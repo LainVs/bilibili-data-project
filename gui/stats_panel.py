@@ -1,0 +1,507 @@
+"""统计面板：库内采集汇总 + 排行榜。
+
+排行榜（发言最多的人 / 重复文案 / 高赞评论 / 被评视频 / 被评UP）
+支持时间范围与自定义 Top N，数据量大时统一在后台线程执行，
+完成后通过队列线程安全回填，避免主线程卡死。
+
+启动时只读取 stats_cache 缓存（单行 JSON，秒级），不触发全表聚合；
+仅点击「刷新」才重新查询并落盘缓存——彻底消除启动即慢的问题。
+"""
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk
+
+from gui.util import fmt_dt
+from gui.widgets import SmartTable
+from storage import dao
+
+logger = logging.getLogger(__name__)
+
+
+class StatsPanel(ttk.Frame):
+    """库内采集数据总览 + 排行榜。"""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
+        self._stats_q: queue.Queue = queue.Queue()
+        self._db_q: queue.Queue = queue.Queue()
+        self._build_ui()
+        self.start_polling()
+        self._load_cached()
+        self._refresh_db_info()
+
+    def _refresh_db_info(self) -> None:
+        """后台线程查询数据库位置/占用/数据目录（秒级，不阻塞UI）。"""
+
+        def _worker() -> None:
+            try:
+                info = dao.query_db_usage()
+                # 追加数据目录路径
+                from storage.db import get_conn
+                conn = get_conn("read")
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT @@datadir AS d")
+                        row = cur.fetchone()
+                        if row:
+                            info["datadir"] = row["d"]
+                finally:
+                    conn.close()
+                self._db_q.put(info)
+            except Exception as exc:
+                logger.warning("数据库信息查询失败: %s", exc)
+                self._db_q.put(None)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _reset_refresh_btns(self) -> None:
+        try:
+            self.btn_refresh.configure(state="normal", text="刷新")
+            self.btn_stats_only.configure(state="normal", text="仅刷新总览")
+            self.prog.configure(value=0)
+            self._overlay.place_forget()
+        except tk.TclError:
+            pass
+
+    def _check_cancel_join(self) -> None:
+        """取消后轮询等后台线程真正退出，再恢复按钮（避免重入假死）。"""
+        try:
+            th = getattr(self, "_stats_thread", None)
+            if th is not None and th.is_alive():
+                self.after(500, self._check_cancel_join)
+                return
+            self._reset_refresh_btns()
+        except tk.TclError:
+            pass
+
+    def _load_cached(self) -> None:
+        """启动只读上次缓存（后台线程，不阻塞 UI），完成后队列回填。
+
+        原实现主线程同步读库：库繁忙时（连接排队/建表等待）会卡住整个窗口，
+        故改为与「刷新」一致的后台执行模式。
+        """
+
+        def _worker() -> None:
+            try:
+                cached = dao.load_stats_cache()
+            except Exception as exc:
+                logger.warning("统计缓存读取失败: %s", exc)
+                cached = None
+            if cached and cached.get("stats") is not None:
+                # 有 stats 就秒显，无 ranks 也不自动刷（让用户手动点刷新）
+                self._stats_q.put((cached["stats"], cached.get("ranks"),
+                                   cached.get("time", "")))
+            else:
+                self._stats_q.put(None)  # 无缓存 → 显示占位，不自动刷
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def start_polling(self) -> None:
+        """主线程周期排污结果队列（每 200ms），实现线程安全回填。"""
+        self.after(200, self.start_polling)
+        if getattr(self, "_auto_stats", False):
+            self._auto_stats = False
+            self.refresh(mode="stats_only")  # 坏缓存/无缓存：自动补真实统计
+        try:
+            while True:
+                payload = self._stats_q.get_nowait()
+                self._apply(payload)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                info = self._db_q.get_nowait()
+                self._apply_db_info(info)
+        except queue.Empty:
+            pass
+
+    def _build_ui(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(3, weight=1)
+
+        wrap = ttk.Frame(self, padding=10)
+        wrap.grid(row=0, column=0, sticky="ew")
+        wrap.columnconfigure(0, weight=1)
+
+        # 筛选行
+        top = ttk.Frame(wrap)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(top, text="库内采集统计", font=("", 11, "bold")).pack(side="left")
+        ttk.Label(top, text=" 时间从:").pack(side="left", padx=(16, 0))
+        self.var_start = tk.StringVar()
+        ttk.Entry(top, textvariable=self.var_start, width=11).pack(side="left", padx=2)
+        ttk.Label(top, text="至:").pack(side="left")
+        self.var_end = tk.StringVar()
+        ttk.Entry(top, textvariable=self.var_end, width=11).pack(side="left", padx=2)
+        ttk.Label(top, text="Top N:").pack(side="left", padx=(12, 0))
+        self.var_top = tk.StringVar(value="100")
+        ttk.Spinbox(top, from_=10, to=500, textvariable=self.var_top, width=6).pack(side="left")
+        ttk.Label(top, text="文案长度下限:").pack(side="left", padx=(12, 0))
+        self.var_minlen = tk.StringVar(value="0")
+        ttk.Spinbox(top, from_=0, to=200, textvariable=self.var_minlen, width=5).pack(side="left")
+        self.btn_refresh = ttk.Button(top, text="刷新", command=self.refresh)
+        self.btn_refresh.pack(side="right")
+        self.btn_stats_only = ttk.Button(top, text="仅刷新总览",
+                                         command=lambda: self.refresh(mode="stats_only"))
+        self.btn_stats_only.pack(side="right", padx=6)
+        self.lbl_updated = ttk.Label(top, text="", foreground="#888")
+        self.lbl_updated.pack(side="right", padx=8)
+        ttk.Label(top, text="时间/长度只作用于排行榜（总览为全量）", foreground="#888").pack(side="right", padx=8)
+
+        # 数据总览
+        fm = ttk.LabelFrame(wrap, text="数据总览", padding=(10, 8))
+        fm.grid(row=1, column=0, sticky="new", pady=(0, 8))
+        fm.columnconfigure(0, weight=1)
+
+        labels = [
+            ("采集视频数", "videos"),
+            ("有评论的视频数", "video_with_comments"),
+            ("已采评论条数", "comments"),
+            ("已采弹幕条数", "danmaku"),
+            ("用户维度(UP/评论者)人数", "users"),
+            ("去重评论UID数", "comment_uids"),
+            ("已解析UID弹幕条数", "danmaku_parsed"),
+            ("未解析弹幕条数", "danmaku_unparsed"),
+            ("弹幕UID反查命中hash数", "crc_hits"),
+            ("反查缓存总条数", "crc_total"),
+        ]
+        entries: list[tuple[ttk.Label, str]] = []
+        for i, (text, key) in enumerate(labels):
+            r, c = divmod(i, 2)
+            lbl = ttk.Label(fm, text=f"{text}: --", anchor="w")
+            lbl.grid(row=r, column=c, sticky="ew", padx=(0, 24), pady=3)
+            entries.append((lbl, key))
+        self._cells = entries
+        # 真进度条（总览 10 步）
+        self.prog = ttk.Progressbar(wrap, mode="determinate", maximum=10, value=0)
+        self.prog.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+
+        # 数据库位置与占用
+        db = ttk.LabelFrame(wrap, text="数据库（MySQL）", padding=(10, 8))
+        db.grid(row=3, column=0, sticky="new", pady=(0, 8))
+        db.columnconfigure(0, weight=1)
+        self.lbl_dbloc = ttk.Label(db, text="位置: --", anchor="w")
+        self.lbl_dbloc.grid(row=0, column=0, sticky="ew")
+        self.lbl_dbsize = ttk.Label(db, text="磁盘占用: --", anchor="w")
+        self.lbl_dbsize.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbmem = ttk.Label(db, text="内存: --", anchor="w")
+        self.lbl_dbmem.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbtables = ttk.Label(db, text="表占用: --", anchor="w",
+                                       foreground="#666")
+        self.lbl_dbtables.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_datadir = ttk.Label(db, text="数据目录: --", anchor="w",
+                                     foreground="#555")
+        self.lbl_datadir.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+
+        # 排行榜（底部 Notebook）
+        nb = ttk.Notebook(self)
+        nb.grid(row=3, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        self._rank_trees: dict[str, SmartTable] = {}
+        self._rank_cnts: dict[str, ttk.Label] = {}
+        spec = [
+            ("top_users", "发言最多的人", [
+                ("uid", "UID", 10), ("uname", "昵称", 22), ("cnt", "评论数", 10)]),
+            ("top_texts", "重复最多的文案", [
+                ("content", "内容(完全相同归组)", 80), ("cnt", "次数", 9),
+                ("senders", "人数", 9), ("tlen", "字数", 7)]),
+            ("top_liked", "最高赞评论", [
+                ("like", "赞", 8), ("uname", "发送者", 16), ("content", "内容", 70),
+                ("time", "时间", 14), ("video", "视频", 40)]),
+            ("top_videos", "被评论最多的视频", [
+                ("bvid", "BV", 16), ("title", "标题", 50), ("up", "UP", 18),
+                ("cnt", "评论数", 10)]),
+            ("top_ups", "被评论最多的UP", [
+                ("uid", "UID", 10), ("uname", "昵称", 24), ("cnt", "评论数", 10)]),
+        ]
+        for key, title, cols in spec:
+            tab = ttk.Frame(nb, padding=(4, 2))
+            nb.add(tab, text=title)
+            tab.columnconfigure(0, weight=1)
+            tab.rowconfigure(1, weight=1)
+            cnt = ttk.Label(tab, text="0 条", foreground="#888")
+            cnt.grid(row=0, column=0, sticky="w")
+            tree = SmartTable(tab, show="headings")
+            tree.set_columns(cols)
+            tree.grid(row=1, column=0, sticky="nsew")
+            sb = ttk.Scrollbar(tab, command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            sb.grid(row=1, column=1, sticky="ns")
+            self._rank_trees[key] = tree
+            self._rank_cnts[key] = cnt
+        self._nb = nb
+        self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消…", background="#fffbe6", foreground="#b36",
+                                  font=("Microsoft YaHei UI", 11, "bold"), anchor="center")
+
+    def refresh(self, mode: str = "full") -> None:
+        """后台线程执行统计（与排行榜）查询，完成后回填，主线程不阻塞。
+
+        mode="full"        ：总览 + 全部排行榜 + 落盘缓存（较慢）
+        mode="stats_only"  ：只刷新"数据总览"条目（秒级），排行榜保持上次结果
+        点击时若正在统计，则取消本次统计。
+        """
+        if getattr(self, "_stats_thread", None) and self._stats_thread.is_alive():
+            # 协作式取消：发信号后按钮置“取消中…”禁用，等线程真正退出再恢复
+            # （dao 层查完当前仓即停；在途单条 SQL 最多等到 read 超时）
+            self._stats_stop.set()
+            self.btn_refresh.configure(state="disabled", text="取消中…")
+            self.btn_stats_only.configure(state="disabled", text="取消中…")
+            try:
+                self._overlay.configure(text="正在取消…查完当前仓即停")
+            except tk.TclError:
+                pass
+            self.after(500, self._check_cancel_join)
+            return
+        try:
+            top_n = max(1, int(self.var_top.get() or 100))
+        except ValueError:
+            top_n = 100
+        try:
+            min_len = max(0, int(self.var_minlen.get() or 0))
+        except ValueError:
+            min_len = 0
+        start = self.var_start.get().strip()
+        end = self.var_end.get().strip()
+        if mode == "full" and start and end and start > end:
+            from tkinter import messagebox
+
+            messagebox.showerror("错误", "时间范围无效：开始晚于结束")
+            return
+        self._stats_stop = threading.Event()
+        # 允许点击取消，所以保持可点
+        self.btn_refresh.configure(state="normal", text="取消统计" if mode=="full" else "刷新")
+        self.btn_stats_only.configure(state="normal" if mode!="full" else "disabled")
+        if mode == "full":
+            self.btn_refresh.configure(text="取消统计")
+        else:
+            self.btn_stats_only.configure(text="总览统计中…")
+        try:
+            self.prog.configure(value=0, maximum=10)
+        except: pass
+        try:
+            self._overlay.place(relx=0, rely=1.0, anchor="sw", relwidth=1, relheight=0.18)
+            self._overlay.lift()
+        except tk.TclError:
+            pass
+        self._refresh_db_info()
+
+        def _worker() -> None:
+            stop = self._stats_stop
+            stats = ranks = None
+            STAT_NAMES = ["采集视频数","有评论的视频数","已采评论条数","已采弹幕条数","用户维度",
+                          "去重评论UID数","已解析弹幕","未解析弹幕","弹幕hash","缓存总条数"]
+            RANK_NAMES = ["发言最多的人","重复文案","最高赞评论","被评论最多的视频","被评论最多的UP"]
+            def _set_overlay(txt):
+                try: self.after(0, lambda t=txt: self._overlay.configure(text=t))
+                except: pass
+            def _prog(done, total):
+                try:
+                    self.after(0, lambda d=done, t=total: self.prog.configure(value=d, maximum=15))
+                except: pass
+            try:
+                def _prog10(d, t):
+                    name = STAT_NAMES[d-1] if 1 <= d <= len(STAT_NAMES) else f"总览 {d}/{t}"
+                    _set_overlay(f"统计中… 总览 {name} ({d}/{t})  点击「取消统计」可取消")
+                    _prog(d, 15)
+                _set_overlay("统计中… 正在统计总览 (0/10)")
+                stats = dao.get_collection_stats(progress_cb=_prog10, stop_event=stop)
+                self.after(0, lambda: self.prog.configure(value=10, maximum=15))
+                _set_overlay("总览完成，正在统计排行榜…")
+            except dao.StatsCancelled:
+                pass  # 用户取消，不是故障
+            except Exception as exc:
+                logger.warning("统计查询失败: %s", exc)
+            if stop.is_set():
+                self.after(0, lambda: self._reset_refresh_btns())
+                return
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            if mode == "stats_only":
+                self._stats_q.put((stats, None, now, "stats_only"))
+                if stats is not None and not stop.is_set():
+                    try:
+                        from gui.util import ping_main as _ping2
+                        self.after(0, lambda: _ping2(self, "统计"))
+                    except Exception:
+                        pass
+                return
+            try:
+                def _prog_rank(d, t):
+                    name = RANK_NAMES[d-1] if 1 <= d <= len(RANK_NAMES) else f"排行榜 {d}/{t}"
+                    _set_overlay(f"统计中… 排行榜 {name} ({d}/{t})  点击「取消统计」可取消")
+                    try:
+                        self.after(0, lambda dd=d, tt=t: self.prog.configure(value=10+dd, maximum=15))
+                    except: pass
+                ranks = dao.get_rankings(start=start, end=end, top=top_n,
+                                         min_text_len=min_len, progress_cb=_prog_rank,
+                                         stop_event=stop)
+                self.after(0, lambda: self.prog.configure(value=15, maximum=15))
+                _set_overlay("统计完成")
+            except dao.StatsCancelled:
+                pass  # 用户取消，不是故障
+            except Exception as exc:
+                logger.warning("排行榜查询失败: %s", exc)
+            if stop.is_set():
+                self.after(0, lambda: self._reset_refresh_btns())
+                return
+            _failed = (stats.get("_failed_shards") or {}) if isinstance(stats, dict) else {}
+            if stats is not None and ranks is not None and not _failed:
+                dao.save_stats_cache({"stats": stats, "ranks": ranks, "time": now})
+                try:
+                    from gui.util import ping_main as _ping
+                    self.after(0, lambda: _ping(self, "统计"))
+                except Exception:
+                    pass
+            elif _failed:
+                # 部分分片失败：不存残数，明确告诉用户哪几项不全
+                _miss = ", ".join(f"{k}({','.join(v)})" for k, v in _failed.items())
+                logger.warning("统计部分分片失败，未存缓存: %s", _miss)
+                now = f"部分失败（{_miss}），显示为部分数据，未存缓存"
+            else:
+                try:
+                    cached = dao.load_stats_cache()
+                except Exception:
+                    cached = None
+                if cached and cached.get("stats") is not None and cached.get("ranks") is not None:
+                    stats = cached["stats"]
+                    ranks = cached["ranks"]
+                    now = "上次成功数据（本次刷新失败，可能数据库繁忙）"
+                    logger.warning("统计刷新失败，回退缓存展示")
+                elif stats is None:
+                    stats = None
+            self._stats_q.put((stats, ranks, now))
+        self._stats_thread = threading.Thread(target=_worker, daemon=True)
+        self._stats_thread.start()
+
+
+    def _set_updated(self, text: str) -> None:
+        try:
+            self.lbl_updated.configure(text=text)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fmt_rows(n) -> str:
+        """行数缩写：3_000_000 → 3.0M。"""
+        try:
+            n = int(n or 0)
+        except (TypeError, ValueError):
+            return "?"
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n / 1_000:.0f}K"
+        return str(n)
+
+    def _apply_db_info(self, info) -> None:
+        if not isinstance(info, dict):
+            for lbl in (self.lbl_dbloc, self.lbl_dbsize,
+                        self.lbl_dbmem, self.lbl_dbtables, self.lbl_datadir):
+                lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: 查询失败")
+            return
+        ver = f"{info.get('version', '')}".split("-")[0]
+        self.lbl_dbloc.configure(
+            text=f"位置: {info.get('host', '')}:{info.get('port', '')} "
+                 f"/ {info.get('database', '')} ({info.get('charset', '')})"
+                 + (f"   版本: {ver}" if ver else ""))
+        size = info.get("size_total_mb") or 0
+        size_txt = (f"{size / 1024:.2f} GB" if size >= 1024 else f"{size:.0f} MB")
+        self.lbl_dbsize.configure(
+            text=f"磁盘占用: {size_txt}（数据+索引，共 {info.get('table_count', 0)} 张表）")
+        bp = info.get("bp_mb")
+        cached = info.get("cached_mb")
+        mem = info.get("mem_mb")
+        parts = [f"缓冲池 {bp:g} MB" if bp else "缓冲池: --"]
+        if cached is not None:
+            parts.append(f"已缓存数据 {cached:g} MB")
+        if mem is not None:
+            parts.append(f"进程分配 ≈{mem:g} MB")
+        self.lbl_dbmem.configure(text="内存: " + " / ".join(parts))
+        top = [t for t in (info.get("tables") or []) if t.get("name")]
+        big = top[:4]
+        if big:
+            cells = "   ".join(
+                f"{t['name']} {self._fmt_rows(t.get('rows'))}行 {t.get('size_mb', 0):g}MB"
+                for t in big)
+            self.lbl_dbtables.configure(text=f"占用前{len(big)}: {cells}")
+        else:
+            self.lbl_dbtables.configure(text="表占用: 无业务表")
+        datadir = info.get("datadir", "")
+        if datadir:
+            self.lbl_datadir.configure(text=f"数据目录: {datadir}")
+
+    def _apply(self, payload) -> None:
+        if payload is None:  # 无缓存：显示占位，不写失败
+            for lbl, _key in self._cells:
+                lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: --")
+            for _key, tree in self._rank_trees.items():
+                for iid in tree.get_children():
+                    tree.delete(iid)
+            self._set_updated("暂无统计——点击「刷新」生成（首次生成较慢）")
+            return
+        if not isinstance(payload, tuple):
+            return
+        stats, ranks, updated = (payload + ("", ""))[:3]
+        mode = payload[3] if len(payload) > 3 else "full"
+        self.btn_refresh.configure(state="normal")
+        self.btn_refresh.configure(text="刷新")
+        self.btn_stats_only.configure(state="normal")
+        self.btn_stats_only.configure(text="仅刷新总览")
+        if mode == "stats_only":
+            # 仅总览：只更新条目与时间标签，排行榜与缓存不动
+            self._set_updated(
+                f"总览更新: {updated}" if stats is not None
+                else "仅总览刷新失败（排行榜保持上次结果）")
+            if stats is None:
+                for lbl, _key in self._cells:
+                    lbl.configure(text="-- 读取失败 --")
+            else:
+                for lbl, key in self._cells:
+                    lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}")
+            return
+        self._set_updated(f"上次更新: {updated}" if updated else "")
+        # 总览
+        if stats is None:
+            for lbl, _key in self._cells:
+                lbl.configure(text="-- 读取失败 --")
+        else:
+            for lbl, key in self._cells:
+                lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}")
+        # 排行榜
+        if not isinstance(ranks, dict):
+            for key, tree in self._rank_trees.items():
+                for iid in tree.get_children():
+                    tree.delete(iid)
+                self._rank_cnts[key].configure(text="-- 读取失败 --")
+            return
+        for key, tree in self._rank_trees.items():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            rows = ranks.get(key) or []
+            for r in rows:
+                tree.insert("", "end", values=self._fmt_row(key, r))
+            self._rank_cnts[key].configure(text=f"{len(rows)} 条")
+
+    @staticmethod
+    def _fmt_row(key: str, r: dict) -> tuple:
+        """按榜单类型把 DB 行格式化为表格 cells。"""
+        if key == "top_users":
+            return (r.get("uid", ""), r.get("uname", "") or "", r.get("cnt", 0))
+        if key == "top_texts":
+            content = str(r.get("content", ""))
+            return (content[:200], r.get("cnt", 0), r.get("senders", 0),
+                    r.get("tlen", len(content)))
+        if key == "top_liked":
+            return (r.get("like_num", 0), r.get("uname", "") or r.get("uid", ""),
+                    str(r.get("content", ""))[:180], fmt_dt(r.get("ctime")),
+                    f"{r.get('bvid', '')} {str(r.get('title', '') or '')[:26]}")
+        if key == "top_videos":
+            up = r.get("owner_name") or ""
+            return (r.get("bvid", ""), str(r.get("title", "") or "")[:60], up,
+                    r.get("cnt", 0))
+        if key == "top_ups":
+            return (r.get("uid", ""), r.get("uname", "") or "", r.get("cnt", 0))
+        return tuple(str(v) for v in r.values())[:6]

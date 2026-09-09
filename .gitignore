@@ -1,0 +1,44 @@
+# ========== 敏感配置（绝不入库） ==========
+config/settings.ini
+config/bili_cookie.txt
+config/*.bak*
+config/*.unitbak
+*.local.ini
+.env
+*.pem
+*.key
+
+# ========== 运行期状态/缓存（本机生成） ==========
+logs/
+storage/session.json
+storage/stats_cache.json
+storage/shard_progress.json
+storage/dead_letters/
+*.log
+
+# ========== 采集结果与数据文件 ==========
+*.csv
+*.xlsx
+*.json
+*.sql
+*.sql.gz
+*.dump
+*.rainbow
+*.table
+
+# ========== 打包产物 ==========
+dist/
+build/
+*.egg-info/
+
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
+
+# ========== 系统文件 ==========
+Thumbs.db
+.DS_Store
