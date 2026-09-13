@@ -114,40 +114,57 @@ def _ensure_global_uids() -> None:
         pass
 
 
+_GLOBAL_WRITE_LOCK = threading.Lock()
+_GLOBAL_INSERT_BATCH = 500  # 9M 表上大批 INSERT IGNORE 极慢，分小批提交
+
+
+def _exec_global_insert(conn, sql, rows, batch: int = _GLOBAL_INSERT_BATCH):
+    """分批 executemany + 逐批 commit，避免长事务锁表/HDD 寻道风暴。"""
+    with conn.cursor() as cur:
+        for i in range(0, len(rows), batch):
+            cur.executemany(sql, rows[i:i + batch])
+        conn.commit()
+
+
 def add_global_comment_uids(uids) -> int:
     """直播喂数：评论者 uid 同时进 global_uids + global_comment_uids。
 
     E 离线静默跳过返回 0（归档 hook 会补，不抛异常、不进坏账）。
+    小批量分批提交 + 全局写锁串行化，防止并发连接堆积。
     """
     ids = {int(u) for u in (uids or []) if u}
     if not ids:
         return 0
-    try:
-        conn = _r_strict()
-    except EArchiveOfflineError:
-        return 0
-    except Exception as exc:
-        logger.warning("全局uid直播写入连接失败: %s", exc)
-        return 0
-    try:
-        rows = [(i,) for i in ids]
-        with conn.cursor() as cur:
-            cur.executemany("INSERT IGNORE INTO global_uids (uid) VALUES (%s)", rows)
-            cur.executemany("INSERT IGNORE INTO global_comment_uids (uid) VALUES (%s)", rows)
-        conn.commit()
-        return len(ids)
-    except Exception as exc:
-        logger.warning("全局uid直播写入失败(%s 个): %s", len(ids), exc)
-        try: conn.rollback()
-        except Exception: pass
-        return 0
-    finally:
-        try: conn.close()
-        except Exception: pass
+    rows = [(i,) for i in ids]
+    with _GLOBAL_WRITE_LOCK:
+        try:
+            conn = _r_strict()
+        except EArchiveOfflineError:
+            return 0
+        except Exception as exc:
+            logger.warning("全局uid直播写入连接失败: %s", exc)
+            return 0
+        try:
+            _exec_global_insert(conn,
+                "INSERT IGNORE INTO global_uids (uid) VALUES (%s)", rows)
+            _exec_global_insert(conn,
+                "INSERT IGNORE INTO global_comment_uids (uid) VALUES (%s)", rows)
+            return len(ids)
+        except Exception as exc:
+            logger.warning("全局uid直播写入失败(%s 个): %s", len(ids), exc)
+            try: conn.rollback()
+            except Exception: pass
+            return 0
+        finally:
+            try: conn.close()
+            except Exception: pass
 
 
 def add_global_users(pairs) -> int:
-    """直播喂数：(uid, uname) 进 global_uids。E 离线静默跳过。"""
+    """直播喂数：(uid, uname) 进 global_uids。E 离线静默跳过。
+
+    小批量分批提交 + 全局写锁串行化。
+    """
     rows = []
     for p in (pairs or []):
         try:
@@ -158,27 +175,26 @@ def add_global_users(pairs) -> int:
             rows.append((uid, uname))
     if not rows:
         return 0
-    try:
-        conn = _r_strict()
-    except EArchiveOfflineError:
-        return 0
-    except Exception as exc:
-        logger.warning("全局用户直播写入连接失败: %s", exc)
-        return 0
-    try:
-        with conn.cursor() as cur:
-            cur.executemany(
+    with _GLOBAL_WRITE_LOCK:
+        try:
+            conn = _r_strict()
+        except EArchiveOfflineError:
+            return 0
+        except Exception as exc:
+            logger.warning("全局用户直播写入连接失败: %s", exc)
+            return 0
+        try:
+            _exec_global_insert(conn,
                 "INSERT IGNORE INTO global_uids (uid, uname) VALUES (%s, %s)", rows)
-        conn.commit()
-        return len(rows)
-    except Exception as exc:
-        logger.warning("全局用户直播写入失败(%s 个): %s", len(rows), exc)
-        try: conn.rollback()
-        except Exception: pass
-        return 0
-    finally:
-        try: conn.close()
-        except Exception: pass
+            return len(rows)
+        except Exception as exc:
+            logger.warning("全局用户直播写入失败(%s 个): %s", len(rows), exc)
+            try: conn.rollback()
+            except Exception: pass
+            return 0
+        finally:
+            try: conn.close()
+            except Exception: pass
 
 
 def get_global_uid_count() -> tuple[int, bool]:
@@ -402,11 +418,25 @@ def backfill_one_shard(shard: str, *, conn=None, progress_cb=None, stop_event=No
             except Exception: pass
 
 
+_BACKFILL_LOCK = threading.Lock()
+
+
 def backfill_global_uids(progress_cb=None, stop_event=None) -> dict:
     """全量回填一次：E 主库+各小仓库 keyset 分块并入全局表 + D 当前内容分块搬运。
 
     返回 {"uids": n, "comment_uids": m, "shards": [...]}。
+    并发调用会排队（非阻塞，第二个调用直接返回空结果）。
     """
+    if not _BACKFILL_LOCK.acquire(blocking=False):
+        logger.info("backfill_global_uids 已有实例在跑，跳过本次")
+        return {"uids": 0, "comment_uids": 0, "shards": []}
+    try:
+        return _backfill_global_uids_impl(progress_cb, stop_event)
+    finally:
+        _BACKFILL_LOCK.release()
+
+
+def _backfill_global_uids_impl(progress_cb=None, stop_event=None) -> dict:
     from storage.db import ensure_global_uid_tables
     ensure_global_uid_tables("read")
     res: dict = {"uids": 0, "comment_uids": 0, "shards": []}
