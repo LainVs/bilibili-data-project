@@ -1100,19 +1100,23 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
     _failed_lock = threading.Lock()
 
     def _run(key: str, sql: str, fallback_col: str | None) -> None:
-        # users / comment_uids：全局去重并集优先（覆盖全仓时精确秒出）；
-        # 未覆盖时回退老口径跨仓求和（users 含跨仓重复，仅作过渡）。
+        # users / comment_uids：global_uids/global_comment_uids 是唯一精确来源；
+        # 即使 coverage 标记未覆盖（E 离线/新增仓未回填），只要表非空就用它，
+        # 避免回退跨仓 dim_user 求和导致重复计数。
         if key in ("users", "comment_uids"):
             try:
                 if stop_event is not None and stop_event.is_set():
                     raise StatsCancelled()
-                if _global_coverage_ok():
-                    n, ok = (get_global_uid_count() if key == "users"
-                             else get_global_comment_uid_count())
-                    if ok and n > 0:
-                        out[key] = n
-                        return
-                logger.info("全局去重表未覆盖，%s 回退老口径", key)
+                n, ok = (get_global_uid_count() if key == "users"
+                         else get_global_comment_uid_count())
+                if ok and n > 0:
+                    out[key] = n
+                    return
+                # global 表为空或 E 离线：仅当表确实为空时才回退老口径
+                if ok:
+                    logger.info("全局去重表为空，%s 回退老口径", key)
+                else:
+                    logger.info("E 离线，%s 回退老口径", key)
             except StatsCancelled:
                 raise
             except Exception as exc:
