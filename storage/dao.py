@@ -1778,12 +1778,26 @@ def _like_esc(keyword: str) -> str:
     )
 
 
+def _parse_keywords(raw: str) -> list[str]:
+    """把逗号/空格分隔的关键词字符串解析为去重列表（保持顺序）。"""
+    import re as _re
+    parts = _re.split(r"[,，\s]+", (raw or "").strip())
+    seen: set = set()
+    out: list[str] = []
+    for p in parts:
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def _ft_term(keyword: str) -> str:
     """把关键词包装成 ngram 全文索引的布尔短语（含转义）。
 
-    ngram_token_size=2：短语“残影里”会被分词为 残影/影里 两个二元组，
-    与正文的二元组分词逐段比对，等效“包含子串”匹配；对于 2 字符词
-    （如“残影”）即是精确包含匹配。返回 "kw" 形式（IN BOOLEAN MODE）。
+    ngram_token_size=2：短语"残影里"会被分词为 残影/影里 两个二元组，
+    与正文的二元组分词逐段比对，等效"包含子串"匹配；对于 2 字符词
+    （如"残影"）即是精确包含匹配。返回 "kw" 形式（IN BOOLEAN MODE）。
     """
     kw = keyword.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{kw}"'
@@ -1792,6 +1806,29 @@ def _ft_term(keyword: str) -> str:
 def _ft_usable(keyword: str) -> bool:
     """是否是 ngram 全文索引可处理的词（≥2 字符；单字走原 LIKE 兜底）。"""
     return len(keyword.strip()) >= 2
+
+
+def _multi_ft_usable(keywords: list[str]) -> bool:
+    """多关键词场景：全部 ≥2 字符才走 FULLTEXT，否则回退 LIKE。"""
+    return bool(keywords) and all(_ft_usable(k) for k in keywords)
+
+
+def _multi_like_cond(alias: str, keywords: list[str]) -> tuple[str, list]:
+    """多关键词 AND LIKE 条件：每个关键词都要出现在 content 中。"""
+    conds, params = [], []
+    for kw in keywords:
+        conds.append(f" AND {alias}.content LIKE %s")
+        params.append("%" + _like_esc(kw) + "%")
+    return "".join(conds), params
+
+
+def _multi_ft_where(alias: str, keywords: list[str]) -> tuple[str, list]:
+    """多关键词 FULLTEXT AND 条件：用 +\"kw1\" +\"kw2\" ... 布尔模式。
+
+    ngram 全文索引下 +\"kw\" 表示该短语必须出现，多个 + 之间是 AND。
+    """
+    terms = " ".join(f'+{_ft_term(k)}' for k in keywords)
+    return f" AND MATCH({alias}.content) AGAINST(%s IN BOOLEAN MODE)", [terms]
 
 
 def _dt_cond(alias: str, start: str, end: str) -> tuple[str, tuple]:
@@ -1821,7 +1858,11 @@ def _exclude_likes(exclude: str) -> tuple[str, list]:
     return "".join(conds), params
 
 
-def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclude: str, limit: int):
+def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclude: str, limit: int,
+                   keywords: list[str] | None = None):
+    kw_list = keywords or _parse_keywords(keyword)
+    if not kw_list:
+        return []
     if not limit or limit <= 0:
         limit = 500000
     import pymysql
@@ -1834,8 +1875,9 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
             cond, params = _dt_cond("c.ctime", start, end)
             excl, excl_params = _exclude_likes(exclude)
             cols = ("t.rpid, t.uid, u.uname, t.content, t.like_num, t.ctime, t.ip_location, t.video_aid, v.bvid, v.title, v.owner_uid, v.owner_name")
-            if _ft_usable(keyword):
-                term = _ft_term(keyword)
+            if len(kw_list) == 1 and _ft_usable(kw_list[0]):
+                # 单关键词 FULLTEXT 路径（原有逻辑）
+                term = _ft_term(kw_list[0])
                 sub_lim = limit * 3 + 3
                 inner_cols = "c.rpid, c.uid, c.content, c.like_num, c.ctime, c.ip_location, c.video_aid"
                 inner = f"SELECT {inner_cols} FROM {db}.raw_comments c WHERE MATCH(c.content) AGAINST(%s IN BOOLEAN MODE)" + cond + excl + " LIMIT %s"
@@ -1843,18 +1885,33 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
                 try:
                     cur.execute(sql, [term, *params, *excl_params, sub_lim, limit])
                 except Exception:
-                    # E shard无FULLTEXT回退LIKE
-                    pat = "%" + _like_esc(keyword) + "%"
+                    pat = "%" + _like_esc(kw_list[0]) + "%"
                     where = "c.content LIKE %s" + cond + excl
                     cols_c = cols.replace("t.", "c.")
                     sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
                     cur.execute(sql2, [pat, *params, *excl_params, limit])
+            elif len(kw_list) >= 2 and _multi_ft_usable(kw_list):
+                # 多关键词 FULLTEXT AND 路径
+                ft_where, ft_params = _multi_ft_where("c", kw_list)
+                inner_cols = "c.rpid, c.uid, c.content, c.like_num, c.ctime, c.ip_location, c.video_aid"
+                inner = f"SELECT {inner_cols} FROM {db}.raw_comments c WHERE 1=1" + ft_where + cond + excl + f" LIMIT {limit * 3 + 3}"
+                sql = f"SELECT {cols} FROM ({inner}) t LEFT JOIN {db}.meta_video v ON v.aid=t.video_aid LEFT JOIN {db}.dim_user u ON u.uid=t.uid ORDER BY t.ctime DESC LIMIT %s"
+                try:
+                    cur.execute(sql, [*ft_params, *params, *excl_params, limit])
+                except Exception:
+                    # FULLTEXT 失败回退 LIKE
+                    like_where, like_params = _multi_like_cond("c", kw_list)
+                    cols_c = cols.replace("t.", "c.")
+                    where = "1=1" + like_where + cond + excl
+                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
+                    cur.execute(sql2, [*like_params, *params, *excl_params, limit])
             else:
-                pat = "%" + _like_esc(keyword) + "%"
-                where = "c.content LIKE %s" + cond + excl
+                # LIKE 路径（单关键词单字 / 多关键词回退）
+                like_where, like_params = _multi_like_cond("c", kw_list)
                 cols_c = cols.replace("t.", "c.")
+                where = "1=1" + like_where + cond + excl
                 sql = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
-                cur.execute(sql, [pat, *params, *excl_params, limit])
+                cur.execute(sql, [*like_params, *params, *excl_params, limit])
             return list(cur.fetchall())
     finally:
         conn.close()
@@ -1863,19 +1920,20 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
     keyword = (keyword or "").strip()
     if not keyword:
         return {"rows": [], "total": 0}
+    kw_list = _parse_keywords(keyword)
     is_unlimited = not limit or limit <= 0
     qlimit = 500000 if is_unlimited else limit
     dbs = _shard_dbs()
     all_rows = []
     for db in dbs:
         try:
-            rows = _search_one_db(db, "read", keyword, start, end, exclude, qlimit)
+            rows = _search_one_db(db, "read", keyword, start, end, exclude, qlimit, keywords=kw_list)
             all_rows.extend(rows)
         except Exception:
             pass
     if not all_rows:
         try:
-            rows = _search_one_db("bilibili_data", "write", keyword, start, end, exclude, qlimit)
+            rows = _search_one_db("bilibili_data", "write", keyword, start, end, exclude, qlimit, keywords=kw_list)
             all_rows = rows
         except Exception:
             pass
@@ -1901,12 +1959,14 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
     """全局搜索弹幕（ngram 全文索引）或发送者标识（mid_hash/uid LIKE）。
 
     exclude：逗号分隔的排除词（对弹幕内容生效）。
+    多关键词用逗号分隔，全部 AND 必须出现在弹幕内容中。
     ≥2 字关键词走 MATCH…AGAINST；单字词回退 LIKE 全扫。
     total 语义同 search_comments（LIMIT+1 探测截断）。
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return {"rows": [], "total": 0}
+    kw_list = _parse_keywords(keyword)
     conn = _r()
     try:
         with conn.cursor() as cur:
@@ -1914,13 +1974,12 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
             excl, excl_params = _exclude_likes_danmaku(exclude)
             cols = ("t.id, t.uid, t.mid_hash, u.uname, t.content, t.progress, "
                     "t.ctime, t.video_aid, v.bvid, v.title, v.owner_name")
-            if _ft_usable(keyword):
-                term = _ft_term(keyword)
+            if len(kw_list) == 1 and _ft_usable(kw_list[0]):
+                # 单关键词 FULLTEXT（原有逻辑）
+                term = _ft_term(kw_list[0])
                 sub_lim = limit * 5 + 5
                 inner_cols = ("d.id, d.uid, d.mid_hash, d.content, d.progress, "
                               "d.ctime, d.video_aid")
-                # 内容分支：不排序，FULLTEXT 直接取相关度 top sub_lim 行（避免对
-                # 高频词全部命中做 filesort，那是 30s 级开销）；时间排序交给外层。
                 inner = (
                     f"SELECT {inner_cols} FROM raw_danmaku d "
                     "WHERE MATCH(d.content) AGAINST(%s IN BOOLEAN MODE)"
@@ -1943,12 +2002,40 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
                     "ORDER BY d.ctime DESC LIMIT %s) "
                     "ORDER BY ctime DESC LIMIT %s"
                 )
-                pat = "%" + _like_esc(keyword) + "%"
+                pat = "%" + _like_esc(kw_list[0]) + "%"
                 cur.execute(sql, [term, *params, *excl_params, sub_lim,
                                   pat, pat, *params, *excl_params, sub_lim,
                                   limit + 1])
+            elif len(kw_list) >= 2:
+                # 多关键词：内容 ALL LIKE + mid_hash/uid 兜底
+                like_where, like_params = _multi_like_cond("d", kw_list)
+                cols_d = cols.replace("t.", "d.")
+                # mid_hash/uid 搜第一个关键词（通常用户搜的是同一个人）
+                uid_pat = "%" + _like_esc(kw_list[0]) + "%"
+                where = ("1=1" + like_where + cond + excl)
+                uid_where = ("(d.mid_hash LIKE %s OR d.uid LIKE %s)"
+                             + cond + excl)
+                sql = (
+                    "SELECT " + cols_d + " FROM raw_danmaku d "
+                    "LEFT JOIN meta_video v ON v.aid = d.video_aid "
+                    "LEFT JOIN dim_user u ON u.uid = d.uid "
+                    f"WHERE {where} "
+                    "UNION "
+                    "SELECT d.id, d.uid, d.mid_hash, u.uname, d.content, "
+                    "d.progress, d.ctime, d.video_aid, "
+                    "v.bvid, v.title, v.owner_name "
+                    "FROM raw_danmaku d "
+                    "LEFT JOIN meta_video v ON v.aid = d.video_aid "
+                    "LEFT JOIN dim_user u ON u.uid = d.uid "
+                    f"WHERE {uid_where} "
+                    "ORDER BY ctime DESC LIMIT %s"
+                )
+                cur.execute(sql, [*like_params, *params, *excl_params,
+                                  uid_pat, uid_pat, *params, *excl_params,
+                                  limit + 1])
             else:
-                pat = "%" + _like_esc(keyword) + "%"
+                # 单字关键词 LIKE 路径
+                pat = "%" + _like_esc(kw_list[0]) + "%"
                 where = ("(d.content LIKE %s OR d.mid_hash LIKE %s "
                          "OR d.uid LIKE %s)" + cond + excl)
                 cols_d = cols.replace("t.", "d.")
@@ -1976,37 +2063,41 @@ def _iter_search(keyword: str, *, table: str, col: str, id_col: str,
 
     仅内容命中（不含昵称分支），时间/排除词条件一致；
     按 (ctime, 主键) 倒序翻页，ctime 撞车用主键兜底保证不重不漏。
+    多关键词用逗号分隔，全部 AND 必须出现在内容中。
     """
+    kw_list = _parse_keywords(keyword)
     cond, params = _dt_cond(f"{alias}.ctime", start, end)
     excl, excl_params = _exclude_likes(exclude)
+    # 多关键词 AND LIKE 条件
+    like_where, like_params = _multi_like_cond(alias, kw_list)
     conn = _r()
     try:
         with conn.cursor() as cur:
             last_ctime = None
             last_id = None
             while True:
-                params_batch = list(params) + list(excl_params)
+                params_batch = list(like_params) + list(params) + list(excl_params)
                 if last_ctime is not None:
                     sql = (
                         f"SELECT {cols} FROM {table} {alias} "
                         "LEFT JOIN meta_video v ON v.aid = " + alias + ".video_aid "
                         "LEFT JOIN dim_user u ON u.uid = " + alias + ".uid "
-                        "WHERE MATCH(" + alias + "." + col + ") AGAINST(%s IN BOOLEAN MODE)"
+                        f"WHERE 1=1 {like_where}"
                         + cond + excl +
                         f" AND ({alias}.ctime, {alias}.{id_col}) < (%s, %s) "
                         f"ORDER BY {alias}.ctime DESC, {alias}.{id_col} DESC LIMIT %s"
                     )
-                    args = [keyword, *params_batch, last_ctime, last_id, page]
+                    args = [*params_batch, last_ctime, last_id, page]
                 else:
                     sql = (
                         f"SELECT {cols} FROM {table} {alias} "
                         "LEFT JOIN meta_video v ON v.aid = " + alias + ".video_aid "
                         "LEFT JOIN dim_user u ON u.uid = " + alias + ".uid "
-                        "WHERE MATCH(" + alias + "." + col + ") AGAINST(%s IN BOOLEAN MODE)"
+                        f"WHERE 1=1 {like_where}"
                         + cond + excl +
                         f" ORDER BY {alias}.ctime DESC, {alias}.{id_col} DESC LIMIT %s"
                     )
-                    args = [keyword, *params_batch, page]
+                    args = [*params_batch, page]
                 cur.execute(sql, args)
                 rows = list(cur.fetchall())
                 if not rows:
@@ -2047,15 +2138,26 @@ def search_videos(keyword: str, *, start: str = "", end: str = "",
                   limit: int = 50) -> dict:
     """全局搜索视频（标题/BV/UP昵称/UP UID 匹配）。
 
+    多关键词用逗号分隔，全部 AND 必须命中。
     total 语义同 search_comments（LIMIT+1 探测截断）。
     """
+    keyword = (keyword or "").strip()
+    if not keyword:
+        return {"rows": [], "total": 0}
+    kw_list = _parse_keywords(keyword)
     conn = _r()
     try:
         with conn.cursor() as cur:
-            conditions = ["(v.title LIKE %s OR v.bvid LIKE %s "
-                          "OR v.owner_name LIKE %s OR v.owner_uid LIKE %s)"]
-            pat = "%" + _like_esc(keyword) + "%"
-            params: list = [pat] * 4
+            # 每个关键词都要命中（标题/BV/UP 任一字段）
+            all_conds, all_params = [], []
+            for kw in kw_list:
+                pat = "%" + _like_esc(kw) + "%"
+                all_conds.append("(v.title LIKE %s OR v.bvid LIKE %s "
+                                 "OR v.owner_name LIKE %s OR v.owner_uid LIKE %s)")
+                all_params.extend([pat] * 4)
+            where_content = " AND ".join(all_conds)
+            conditions = [where_content]
+            params: list = list(all_params)
             if start:
                 conditions.append("FROM_UNIXTIME(v.pubdate) >= %s")
                 params.append(start)

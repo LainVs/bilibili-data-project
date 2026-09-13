@@ -227,7 +227,8 @@ class SearchPanel(ttk.Frame):
             foreground="#888", justify="left", wraplength=110)
         mdl_label.pack(pady=(14, 0), padx=4)
 
-        self.lbl_hint = ttk.Label(self, text="输入关键词后按回车或点搜索。", foreground="#b36")
+        self.lbl_hint = ttk.Label(self, text="输入关键词后按回车或点搜索。多个关键词用逗号分隔（如：烂片,剧情差）表示全部都要包含。",
+                                  foreground="#b36")
         self.lbl_hint.grid(row=3, column=0, sticky="w", padx=8)
         self._fresh_sec_view()
         self._render_section_title()
@@ -336,7 +337,9 @@ class SearchPanel(ttk.Frame):
                  if totals[k] is None or totals[k] > shown[k]]
         shown_txt = {k: (str(v) if v is not None else f"≥{shown[k]}")
                      for k, v in totals.items()}
-        msg = (f"词「{kw}」评论 {shown['cmt']}/{shown_txt['cmt']} · "
+        from storage.dao import _parse_keywords
+        kw_display = " + ".join(_parse_keywords(kw)) if _parse_keywords(kw) else kw
+        msg = (f"词「{kw_display}」评论 {shown['cmt']}/{shown_txt['cmt']} · "
                f"弹幕 {shown['dmk']}/{shown_txt['dmk']} · "
                f"视频 {shown['video']}/{shown_txt['video']} 条")
         if trunc:
@@ -501,15 +504,18 @@ class SearchPanel(ttk.Frame):
 
     @staticmethod
     def _highlight(txt: "tk.Text", keyword: str) -> None:
+        """高亮所有关键词（逗号分隔），每个词单独高亮。"""
+        from storage.dao import _parse_keywords
         txt.tag_configure("hit", background="#ffe28a", foreground="#a00")
-        start = "1.0"
-        while True:
-            pos = txt.search(keyword, start, stopindex="end", nocase=True)
-            if not pos:
-                break
-            end = f"{pos}+{len(keyword)}c"
-            txt.tag_add("hit", pos, end)
-            start = end
+        for kw in _parse_keywords(keyword):
+            start = "1.0"
+            while True:
+                pos = txt.search(kw, start, stopindex="end", nocase=True)
+                if not pos:
+                    break
+                end = f"{pos}+{len(kw)}c"
+                txt.tag_add("hit", pos, end)
+                start = end
 
     # ---------------- 双击详情 ----------------
     def _on_double_click(self, event) -> None:
