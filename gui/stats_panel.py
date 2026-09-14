@@ -110,7 +110,10 @@ class StatsPanel(ttk.Frame):
         try:
             while True:
                 payload = self._stats_q.get_nowait()
-                self._apply(payload)
+                if isinstance(payload, tuple) and len(payload) > 3 and payload[3] == "rank_partial":
+                    self._apply_rank_partial(payload)
+                else:
+                    self._apply(payload)
         except queue.Empty:
             pass
         try:
@@ -122,7 +125,7 @@ class StatsPanel(ttk.Frame):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(4, weight=1)  # 排行榜 notebook
 
         wrap = ttk.Frame(self, padding=10)
         wrap.grid(row=0, column=0, sticky="ew")
@@ -153,9 +156,35 @@ class StatsPanel(ttk.Frame):
         self.lbl_updated.pack(side="right", padx=8)
         ttk.Label(top, text="时间/长度只作用于排行榜（总览为全量）", foreground="#888").pack(side="right", padx=8)
 
+        # 排行榜勾选行
+        rank_row = ttk.Frame(wrap)
+        rank_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(rank_row, text="刷新排行榜:", foreground="#666").pack(side="left")
+        self._rank_vars: dict[str, tk.BooleanVar] = {}
+        for key, label in [("top_users", "发言人"), ("top_texts", "重复文案"),
+                           ("top_liked", "最高赞"), ("top_videos", "热门视频"),
+                           ("top_ups", "热门UP")]:
+            var = tk.BooleanVar(value=True)
+            self._rank_vars[key] = var
+            ttk.Checkbutton(rank_row, text=label, variable=var).pack(side="left", padx=(6, 0))
+
+        # 排行榜勾选行
+        rank_row = ttk.Frame(wrap)
+        rank_row.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        # 放到筛选行下方（row=0 已被 top 占，用 grid row=0 但在 top 下面需要调整）
+        # 采用 pack 方式插入，放在 top 之后
+        ttk.Label(rank_row, text="刷新排行榜:", foreground="#666").pack(side="left")
+        self._rank_vars: dict[str, tk.BooleanVar] = {}
+        for key, label in [("top_users", "发言人"), ("top_texts", "重复文案"),
+                           ("top_liked", "最高赞"), ("top_videos", "热门视频"),
+                           ("top_ups", "热门UP")]:
+            var = tk.BooleanVar(value=True)
+            self._rank_vars[key] = var
+            ttk.Checkbutton(rank_row, text=label, variable=var).pack(side="left", padx=(6, 0))
+
         # 数据总览
         fm = ttk.LabelFrame(wrap, text="数据总览", padding=(10, 8))
-        fm.grid(row=1, column=0, sticky="new", pady=(0, 8))
+        fm.grid(row=2, column=0, sticky="new", pady=(0, 8))
         fm.columnconfigure(0, weight=1)
 
         labels = [
@@ -179,11 +208,11 @@ class StatsPanel(ttk.Frame):
         self._cells = entries
         # 真进度条（总览 10 步）
         self.prog = ttk.Progressbar(wrap, mode="determinate", maximum=10, value=0)
-        self.prog.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.prog.grid(row=3, column=0, sticky="ew", pady=(4, 0))
 
         # 数据库位置与占用
         db = ttk.LabelFrame(wrap, text="数据库（MySQL）", padding=(10, 8))
-        db.grid(row=3, column=0, sticky="new", pady=(0, 8))
+        db.grid(row=4, column=0, sticky="new", pady=(0, 8))
         db.columnconfigure(0, weight=1)
         self.lbl_dbloc = ttk.Label(db, text="位置: --", anchor="w")
         self.lbl_dbloc.grid(row=0, column=0, sticky="ew")
@@ -200,7 +229,7 @@ class StatsPanel(ttk.Frame):
 
         # 排行榜（底部 Notebook）
         nb = ttk.Notebook(self)
-        nb.grid(row=3, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        nb.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 4))
         self._rank_trees: dict[str, SmartTable] = {}
         self._rank_cnts: dict[str, ttk.Label] = {}
         spec = [
@@ -294,7 +323,9 @@ class StatsPanel(ttk.Frame):
             stats = ranks = None
             STAT_NAMES = ["采集视频数","有评论的视频数","已采评论条数","已采弹幕条数","用户维度",
                           "去重评论UID数","已解析弹幕","未解析弹幕","弹幕hash","缓存总条数"]
-            RANK_NAMES = ["发言最多的人","重复文案","最高赞评论","被评论最多的视频","被评论最多的UP"]
+            RANK_NAMES = {"top_users": "发言最多的人", "top_texts": "重复文案",
+                          "top_liked": "最高赞评论", "top_videos": "被评论最多的视频",
+                          "top_ups": "被评论最多的UP"}
             def _set_overlay(txt):
                 try: self.after(0, lambda t=txt: self._overlay.configure(text=t))
                 except: pass
@@ -302,17 +333,20 @@ class StatsPanel(ttk.Frame):
                 try:
                     self.after(0, lambda d=done, t=total: self.prog.configure(value=d, maximum=15))
                 except: pass
+            # 读取勾选的排行榜
+            which = [k for k, v in self._rank_vars.items() if v.get()]
+            rank_count = len(which)
+            rank_done_idx = [0]
             try:
                 def _prog10(d, t):
                     name = STAT_NAMES[d-1] if 1 <= d <= len(STAT_NAMES) else f"总览 {d}/{t}"
                     _set_overlay(f"统计中… 总览 {name} ({d}/{t})  点击「取消统计」可取消")
-                    _prog(d, 15)
+                    _prog(d, 10 + rank_count)
                 _set_overlay("统计中… 正在统计总览 (0/10)")
                 stats = dao.get_collection_stats(progress_cb=_prog10, stop_event=stop)
-                self.after(0, lambda: self.prog.configure(value=10, maximum=15))
-                _set_overlay("总览完成，正在统计排行榜…")
+                self.after(0, lambda: self.prog.configure(value=10, maximum=10 + rank_count))
             except dao.StatsCancelled:
-                pass  # 用户取消，不是故障
+                pass
             except Exception as exc:
                 logger.warning("统计查询失败: %s", exc)
             if stop.is_set():
@@ -328,20 +362,45 @@ class StatsPanel(ttk.Frame):
                     except Exception:
                         pass
                 return
+            # 排行榜：逐个完成逐个回调 + 逐个落缓存
+            ranks = {}
+            partial_ranks = {}
+            def _rank_done(key, rows):
+                ranks[key] = rows
+                partial_ranks[key] = rows
+                rank_done_idx[0] += 1
+                name = RANK_NAMES.get(key, key)
+                _set_overlay(f"排行榜 {name} 完成 ({rank_done_idx[0]}/{rank_count})")
+                try:
+                    self.after(0, lambda d=rank_done_idx[0]: self.prog.configure(value=10+d, maximum=10+rank_count))
+                except: pass
+                # 逐个落缓存（已完成的榜立即存盘，中断不丢）
+                try:
+                    dao.save_stats_cache({"stats": stats, "ranks": dict(partial_ranks), "time": now})
+                except Exception:
+                    pass
+                # 逐个推给 GUI 显示
+                try:
+                    self._stats_q.put((None, {key: rows}, now, "rank_partial"))
+                except Exception:
+                    pass
             try:
                 def _prog_rank(d, t):
-                    name = RANK_NAMES[d-1] if 1 <= d <= len(RANK_NAMES) else f"排行榜 {d}/{t}"
-                    _set_overlay(f"统计中… 排行榜 {name} ({d}/{t})  点击「取消统计」可取消")
+                    # d 从 1 开始，对应 which 列表的索引
+                    key = which[d-1] if d <= len(which) else "?"
+                    name = RANK_NAMES.get(key, key)
+                    _set_overlay(f"统计中… 排行榜 {name} ({d}/{rank_count})  点击「取消统计」可取消")
                     try:
-                        self.after(0, lambda dd=d, tt=t: self.prog.configure(value=10+dd, maximum=15))
+                        self.after(0, lambda dd=d: self.prog.configure(value=10+dd, maximum=10+rank_count))
                     except: pass
                 ranks = dao.get_rankings(start=start, end=end, top=top_n,
                                          min_text_len=min_len, progress_cb=_prog_rank,
-                                         stop_event=stop)
-                self.after(0, lambda: self.prog.configure(value=15, maximum=15))
+                                         stop_event=stop, which=which,
+                                         rank_done_cb=_rank_done)
+                self.after(0, lambda: self.prog.configure(value=10+rank_count, maximum=10+rank_count))
                 _set_overlay("统计完成")
             except dao.StatsCancelled:
-                pass  # 用户取消，不是故障
+                pass
             except Exception as exc:
                 logger.warning("排行榜查询失败: %s", exc)
             if stop.is_set():
@@ -484,6 +543,25 @@ class StatsPanel(ttk.Frame):
             for r in rows:
                 tree.insert("", "end", values=self._fmt_row(key, r))
             self._rank_cnts[key].configure(text=f"{len(rows)} 条")
+
+    def _apply_rank_partial(self, payload) -> None:
+        """逐榜完成时的增量回填：只更新完成的那个榜的 Treeview。"""
+        if not isinstance(payload, tuple) or len(payload) < 2:
+            return
+        _, partial_ranks, _, _ = (payload + ("", "", ""))[:4]
+        if not isinstance(partial_ranks, dict):
+            return
+        for key, rows in partial_ranks.items():
+            tree = self._rank_trees.get(key)
+            if tree is None:
+                continue
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for r in (rows or []):
+                tree.insert("", "end", values=self._fmt_row(key, r))
+            cnt_lbl = self._rank_cnts.get(key)
+            if cnt_lbl:
+                cnt_lbl.configure(text=f"{len(rows)} 条")
 
     @staticmethod
     def _fmt_row(key: str, r: dict) -> tuple:
