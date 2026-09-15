@@ -45,6 +45,7 @@ class AsyncDbWriter:
         # 坏账：写不进库的批次不静默丢，记数+留样+落文件
         self._dead_counts: dict[str, int] = {"danmaku": 0, "comments": 0, "users": 0}
         self._dead_samples: dict[str, list] = {"danmaku": [], "comments": [], "users": []}
+        self._dead_calls: dict[str, int] = {"danmaku": 0, "comments": 0, "users": 0}
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name="async-db-writer")
         self._thread.start()
@@ -150,10 +151,16 @@ class AsyncDbWriter:
                 _registry.discard(self)
 
     def _dead_letter(self, kind: str, rows: list, exc: Exception) -> None:
-        """坏账：计数+留样（内存只留前 3 条样）+全量落文件，不静默丢。"""
+        """坏账：计数+留样（内存只留前 3 条样）+全量落文件，不静默丢。
+
+        失败风暴时目录清理节流（每 10 次一次），文件留样 50 条，避免
+        写线程被文件 IO 拖住。
+        """
         try:
             with self._lock:
                 self._dead_counts[kind] = self._dead_counts.get(kind, 0) + len(rows)
+                self._dead_calls[kind] = self._dead_calls.get(kind, 0) + 1
+                _calls = self._dead_calls[kind]
                 keep = self._dead_samples.setdefault(kind, [])
                 for r in rows[:3]:
                     if len(keep) < 3:
@@ -162,22 +169,25 @@ class AsyncDbWriter:
                                          for k, v in (r.items() if isinstance(r, dict) else {})})
                         except Exception:
                             keep.append({"_repr": str(r)[:200]})
+                _n = self._dead_counts[kind]
             # 全量落文件（best-effort，坏账目录按日封顶 50 个文件防爆盘）
             import json as _json
             from pathlib import Path as _Path
             d = _Path(__file__).with_name("dead_letters")
             d.mkdir(exist_ok=True)
-            try:
-                olds = sorted(d.glob(f"{kind}_*.json"))
-                for p in olds[:-49]:
-                    try: p.unlink()
-                    except Exception: pass
-            except Exception:
-                pass
+            if _calls % 10 == 1:
+                # 节流：每 10 次失败才做一次目录清理（glob+排序是文件 IO）
+                try:
+                    olds = sorted(d.glob(f"{kind}_*.json"))
+                    for p in olds[:-49]:
+                        try: p.unlink()
+                        except Exception: pass
+                except Exception:
+                    pass
             fp = d / f"{kind}_{time.strftime('%Y%m%d_%H%M%S')}_{len(rows)}.json"
             try:
                 fp.write_text(_json.dumps({"error": str(exc)[:500], "count": len(rows),
-                                           "rows": rows[:200]}, ensure_ascii=False, default=str),
+                                           "rows": rows[:50]}, ensure_ascii=False, default=str),
                               encoding="utf-8")
             except Exception:
                 pass
