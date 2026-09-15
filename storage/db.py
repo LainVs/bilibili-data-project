@@ -81,48 +81,85 @@ def ensure_conn(conn: pymysql.connections.Connection | None, role: str = "write"
     return conn or get_conn(role)
 
 
+# 进程内 once 标记：ensure_* 都是 IF NOT EXISTS 幂等 DDL，
+# 同一进程只执行一次，避免每次统计/查询重复建连查 information_schema。
+# 失败不标记（E 离线时下次重试），成功才标记。
+_ensured: set[str] = set()
+_ensured_lock = __import__("threading").Lock()
+
+
+def _once_claim(key: str) -> bool:
+    """返回 True 表示本次需要执行；False 表示本进程已成功做过，跳过。"""
+    with _ensured_lock:
+        if key in _ensured:
+            return False
+        return True
+
+
+def _once_done(key: str, ok: bool) -> None:
+    if ok:
+        with _ensured_lock:
+            _ensured.add(key)
+
+
 def ensure_up_stat_table(role: str = "write") -> None:
     """确保 up_crawl_stat 表存在（老库升级：首次查询前自动补建）。"""
+    key = f"up_stat:{role}"
+    if not _once_claim(key):
+        return
     conn = get_conn(role)
     try:
         with conn.cursor() as cur:
             cur.execute(_UP_STAT_DDL)
         conn.commit()
+        _once_done(key, True)
     finally:
         conn.close()
 
 
 def ensure_stats_cache_table(role: str = "write") -> None:
     """确保 stats_cache 表存在（老库升级：启动时惰性补建）。"""
+    key = f"stats_cache:{role}"
+    if not _once_claim(key):
+        return
     conn = get_conn(role)
     try:
         with conn.cursor() as cur:
             cur.execute(_STATS_CACHE_DDL)
         conn.commit()
+        _once_done(key, True)
     finally:
         conn.close()
 
 
 def ensure_stat_counters(role: str = "write") -> None:
     """确保统计去重计数表存在（老库升级：惰性补建）。"""
+    key = f"stat_counters:{role}"
+    if not _once_claim(key):
+        return
     conn = get_conn(role)
     try:
         with conn.cursor() as cur:
             for ddl in (_STAT_UID_COUNTER_DDL, _STAT_AID_COUNTER_DDL):
                 cur.execute(ddl)
         conn.commit()
+        _once_done(key, True)
     finally:
         conn.close()
 
 
 def ensure_global_uid_tables(role: str = "read") -> None:
     """确保全库去重并集表存在。只允许建在 E 主库，D/小仓库不建。"""
+    key = f"global_uid:{role}"
+    if not _once_claim(key):
+        return
     conn = get_conn(role)
     try:
         with conn.cursor() as cur:
             for ddl in (_GLOBAL_UIDS_DDL, _GLOBAL_COMMENT_UIDS_DDL, _GLOBAL_META_DDL):
                 cur.execute(ddl)
         conn.commit()
+        _once_done(key, True)
     finally:
         conn.close()
 
