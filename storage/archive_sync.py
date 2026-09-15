@@ -396,6 +396,25 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             _report(f"全局去重并集 {shard} 完成（dim行约{r.get('uids_add', 0)}）")
         except Exception as e:
             _report(f"全局去重并集跳过（可用回填补）: {e}")
+        # 2.6 ANALYZE 新仓表：LOAD DATA 后 table_rows 失准会导致统计走
+        # 300秒级 COUNT(*) 回退；ANALYZE 只要几十秒。失败不挡归档。
+        try:
+            _ea = _get_conn("read")
+            try:
+                with _ea.cursor() as _cur:
+                    for _table, _pk, _cols in _TABLES:
+                        try:
+                            _cur.execute(f"ANALYZE TABLE `{shard}`.`{_table}`")
+                            list(_cur.fetchall())
+                        except Exception as _ae:
+                            _report(f"ANALYZE {shard}.{_table} 跳过: {_ae}")
+                            break
+                _report(f"ANALYZE {shard} 完成")
+            finally:
+                try: _ea.close()
+                except Exception: pass
+        except Exception as e:
+            _report(f"ANALYZE 跳过: {e}")
     except Exception as exc:
         # fail-closed：验对环节任何异常都不清 D，断点已存可续
         if "2013" in str(exc) or "Lost connection" in str(exc) or "timed out" in str(exc).lower():

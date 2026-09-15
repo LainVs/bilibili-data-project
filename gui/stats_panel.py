@@ -112,6 +112,8 @@ class StatsPanel(ttk.Frame):
                 payload = self._stats_q.get_nowait()
                 if isinstance(payload, tuple) and len(payload) > 3 and payload[3] == "rank_partial":
                     self._apply_rank_partial(payload)
+                elif isinstance(payload, tuple) and payload and payload[0] == "stat_partial":
+                    self._apply_stat_partial(*payload[1:])
                 else:
                     self._apply(payload)
         except queue.Empty:
@@ -329,7 +331,8 @@ class StatsPanel(ttk.Frame):
                     _set_overlay(f"统计中… 总览 {name} ({d}/{t})  点击「取消统计」可取消")
                     _prog(d, 10 + rank_count)
                 _set_overlay("统计中… 正在统计总览 (0/10)")
-                stats = dao.get_collection_stats(progress_cb=_prog10, stop_event=stop)
+                stats = dao.get_collection_stats(progress_cb=_prog10, stop_event=stop,
+                                                 stat_done_cb=_stat_done)
                 self.after(0, lambda: self.prog.configure(value=10, maximum=10 + rank_count))
             except dao.StatsCancelled:
                 pass
@@ -360,6 +363,11 @@ class StatsPanel(ttk.Frame):
             # 排行榜：逐个完成逐个回调 + 逐个落缓存
             ranks = {}
             partial_ranks = {}
+            def _stat_done(key, value, mark=None):
+                try:
+                    self._stats_q.put(("stat_partial", key, value, mark))
+                except Exception:
+                    pass
             def _rank_done(key, rows):
                 ranks[key] = rows
                 partial_ranks[key] = rows
@@ -369,11 +377,12 @@ class StatsPanel(ttk.Frame):
                 try:
                     self.after(0, lambda d=rank_done_idx[0]: self.prog.configure(value=10+d, maximum=10+rank_count))
                 except: pass
-                # 逐个落缓存（已完成的榜立即存盘，中断不丢）
-                try:
-                    dao.save_stats_cache({"stats": stats, "ranks": dict(partial_ranks), "time": now})
-                except Exception:
-                    pass
+                # 逐个落缓存（已完成的榜立即存盘，中断不丢；stats 为空不存防毒缓存）
+                if stats is not None:
+                    try:
+                        dao.save_stats_cache({"stats": stats, "ranks": dict(partial_ranks), "time": now})
+                    except Exception:
+                        pass
                 # 逐个推给 GUI 显示
                 try:
                     self._stats_q.put((None, {key: rows}, now, "rank_partial"))
@@ -548,6 +557,20 @@ class StatsPanel(ttk.Frame):
             base = f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}"
             mark = partial.get(key)
             lbl.configure(text=f"{base}（{mark}）" if mark else base)
+
+    def _fill_one(self, key: str, value, mark=None) -> None:
+        """单个格子实时回填（总览流式）。"""
+        try:
+            for lbl, k in self._cells:
+                if k == key:
+                    base = f"{lbl.cget('text').split(':')[0]}: {int(value or 0):,}"
+                    lbl.configure(text=f"{base}（{mark}）" if mark else base)
+                    break
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+    def _apply_stat_partial(self, key: str, value, mark=None) -> None:
+        self._fill_one(key, value, mark)
 
     def _apply_rank_partial(self, payload) -> None:
         """逐榜完成时的增量回填：只更新完成的那个榜的 Treeview。"""

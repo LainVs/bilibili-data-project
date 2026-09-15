@@ -1027,12 +1027,13 @@ class StatsCancelled(Exception):
     """统计/排行榜被用户取消（协作式，查完当前仓即停）。"""
 
 
-def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
+def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -> dict:
     """汇总库内采集统计：视频/评论/弹幕条数、去重UID数、弹幕反查覆盖。
 
     10 项查询并行执行（各自独立连接），墙钟≈最慢单项；
     去重计数（评论UID/有评论对象）走物化表秒回，物化表缺失时自动回退全扫。
     progress_cb(done, total) 可选，每完成一项回调。
+    stat_done_cb(key, value, mark) 可选，每项出数立即回调（GUI 实时填格）。
     stop_event 可选 threading.Event：置位后查完当前仓即停并抛 StatsCancelled。
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -1061,6 +1062,7 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
     def _count(sql: str) -> tuple[int, list]:
         # 跨shard求和：返回 (总数, 失败的仓列表)。失败的仓不再按 0 混入总数。
         # table_rows 估算为0时回退 COUNT(*)（LOAD DATA 后未 ANALYZE 的情况）。
+        # D 写缓冲也计入（以前只算 E，D 的新数据在总览里隐身）。
         import re
         m = re.search(r"table_name='([^']+)'", sql)
         tbl = m.group(1) if m else ""
@@ -1074,6 +1076,25 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
             failed.append("_shard_list:untrusted")
         if stop_event is not None and stop_event.is_set():
             raise StatsCancelled()
+
+        def _one(conn, db: str, label: str) -> None:
+            nonlocal total, ok_any
+            with conn.cursor() as cur:
+                q = sql.replace("DATABASE()", f"'{db}'")
+                cur.execute(q)
+                row = cur.fetchone()
+                n = int(row["n"] or 0) if row else 0
+                if n == 0 and tbl in ("raw_comments", "meta_video", "dim_user", "raw_danmaku"):
+                    try:
+                        cur.execute(f"SELECT COUNT(*) AS n FROM `{db}`.`{tbl}`")
+                        r2 = cur.fetchone()
+                        n = int(r2["n"] or 0) if r2 else 0
+                    except Exception as e2:
+                        logger.warning(f"_count {label}.{tbl} COUNT(*) 回退失败: {e2}")
+                        raise
+                ok_any = True
+                total += n
+
         for db in dbs:
             if stop_event is not None and stop_event.is_set():
                 raise StatsCancelled()
@@ -1086,27 +1107,26 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                                        password=base["password"], database=db, charset=base["charset"],
                                        cursorclass=pymysql.cursors.DictCursor, connect_timeout=5, read_timeout=120)
                 try:
-                    with conn.cursor() as cur:
-                        q = sql.replace("DATABASE()", f"'{db}'")
-                        cur.execute(q)
-                        row = cur.fetchone()
-                        n = int(row["n"] or 0) if row else 0
-                        if n == 0 and tbl in ("raw_comments", "meta_video", "dim_user", "raw_danmaku"):
-                            try:
-                                cur.execute(f"SELECT COUNT(*) AS n FROM `{db}`.`{tbl}`")
-                                r2 = cur.fetchone()
-                                n = int(r2["n"] or 0) if r2 else 0
-                            except Exception as e2:
-                                logger.warning(f"_count {db}.{tbl} COUNT(*) 回退失败: {e2}")
-                                raise
-                        ok_any = True
-                        total += n
+                    _one(conn, db, db)
                 finally:
                     try: conn.close()
                     except Exception: pass
             except Exception as e:
                 logger.warning(f"_count {db} 失败: {e} sql={sql[:60]}")
                 failed.append(db)
+        # D 写缓冲（SSD，快）
+        if stop_event is not None and stop_event.is_set():
+            raise StatsCancelled()
+        try:
+            _dw = _w()
+            try:
+                _one(_dw, "bilibili_data", "D缓冲")
+            finally:
+                try: _dw.close()
+                except Exception: pass
+        except Exception as e:
+            logger.warning(f"_count D缓冲 失败: {e} sql={sql[:60]}")
+            failed.append("D缓冲")
         if ok_any:
             return total, failed
         # 全仓都失败：严格读 E 一次（尽力），E 也不通则报 0+失败，
@@ -1130,6 +1150,13 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
     _failed_lock = threading.Lock()
 
     def _run(key: str, sql: str, fallback_col: str | None) -> None:
+        def _emit():
+            if stat_done_cb is not None and key in out:
+                try:
+                    stat_done_cb(key, out[key],
+                                 (out.get("_partial") or {}).get(key))
+                except Exception:
+                    pass
         # users / comment_uids：global_uids/global_comment_uids 是唯一精确来源；
         # 即使 coverage 标记未覆盖（E 离线/新增仓未回填），只要表非空就用它，
         # 避免回退跨仓 dim_user 求和导致重复计数。
@@ -1142,6 +1169,7 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                          else get_global_comment_uid_count())
                 if ok and n > 0:
                     out[key] = n
+                    _emit()
                     return
                 # global 表为空或 E 离线：仅当表确实为空时才回退老口径
                 if ok:
@@ -1157,6 +1185,7 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                         out[key] = _cv
                         with _failed_lock:
                             out.setdefault("_partial", {})[key] = "E离线·缓存全量"
+                        _emit()
                         return
             except StatsCancelled:
                 raise
@@ -1208,6 +1237,7 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                 with _failed_lock:
                     out.setdefault("_failed_shards", {})
                     out["_failed_shards"][key] = ["all"]
+        _emit()
 
     total_jobs = len(jobs)
     done = 0
@@ -1303,6 +1333,17 @@ def save_stats_cache(payload: dict) -> None:
             logger.warning("拒绝保存部分失败的统计快照（失败项: %s），保留上次全量缓存",
                            _st.get("_failed_shards"))
             return
+    except Exception:
+        pass
+    # 剥掉运行时标记（_partial/_failed_shards）：缓存只存干净数字，
+    # 否则下次秒显会带上次的“E离线”旧标注
+    try:
+        import copy as _copy
+        payload = _copy.deepcopy(payload)
+        _st2 = payload.get("stats")
+        if isinstance(_st2, dict):
+            _st2.pop("_partial", None)
+            _st2.pop("_failed_shards", None)
     except Exception:
         pass
     # 同步写本地文件（E离线也保留）
