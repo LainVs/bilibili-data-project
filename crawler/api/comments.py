@@ -196,8 +196,9 @@ class CommentFetcher:
                 except Exception:
                     logger.exception("评论进度回调失败")
 
-            logger.info("oid=%s 评论进度 %s 条%s", oid, len(results),
-                        "（增量：已到旧评论边界）" if newest_under_min else "")
+            if guard % 10 == 0 or newest_under_min:
+                logger.info("oid=%s 评论进度 %s 条%s", oid, len(results),
+                            "（增量：已到旧评论边界）" if newest_under_min else "")
             if newest_under_min:
                 break
             if not next_offset:

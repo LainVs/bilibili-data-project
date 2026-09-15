@@ -77,7 +77,7 @@ class DanmakuFetcher:
             with ThreadPoolExecutor(max_workers=max(1, day_workers)) as pool:
                 futures = {pool.submit(_fetch_day, day): day for day in _daterange(start, end)}
                 # 按日期有序收集（等待全部，避免乱序进度），但保留 stop 快速退出
-                for day in _daterange(start, end):
+                for _di, day in enumerate(_daterange(start, end)):
                     if stop_flag is not None and stop_flag.is_set():
                         break
                     fut = None
@@ -100,7 +100,7 @@ class DanmakuFetcher:
                                 except Exception:
                                     logger.exception("弹幕回调失败")
                         items.extend(day_items)
-                    if len(day_items):
+                    if len(day_items) and _di % 10 == 0:
                         logger.info("aid=%s %s 弹幕 %s 条 (累计 %s)", vid_aid, day, len(day_items), len(items))
                     if progress_cb:
                         progress_cb(f"弹幕 {day} -> 累计 {len(items)} 条")
