@@ -51,7 +51,10 @@ class SearchPanel(ttk.Frame):
                     self.btn_search.configure(state="normal", text="搜索")
                     self.lbl_hint.configure(text="搜索出错，详见日志")
                 elif isinstance(item, tuple):
-                    self._apply(*item)
+                    if item and item[0] == "cmt_partial":
+                        self._apply_cmt_partial(*item[1:])
+                    else:
+                        self._apply(*item)
         except queue.Empty:
             pass
 
@@ -297,18 +300,48 @@ class SearchPanel(ttk.Frame):
             hint = "单字关键词走全表扫描，需要几十秒，请耐心等待…"
         self.lbl_hint.configure(text=hint)
         self.btn_search.configure(state="disabled", text="搜索中…")
+        # 搜索代际：旧搜索的残留回调直接丢弃，防止覆盖新结果
+        self._search_gen = getattr(self, "_search_gen", 0) + 1
+        my_gen = self._search_gen
+        # 流式前先清空评论区，避免新旧混排
+        self._sec_rows["cmt"] = []
+        self._stream_total = 0
 
         def _worker() -> None:
+            def _on_shard(db_label: str, rows: list) -> None:
+                self._search_q.put(("cmt_partial", my_gen, db_label, rows))
             try:
-                results = self._query(sources, kw, start, end, limit, exclude)
+                results = self._query(sources, kw, start, end, limit, exclude,
+                                      cmt_cb=_on_shard)
             except Exception as exc:
                 logger.exception("搜索失败")
                 results = None
-            self._search_q.put((results, kw, limit))
+            self._search_q.put((results, kw, limit, my_gen))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _apply(self, results: dict | None, kw: str, limit: int) -> None:
+    def _apply_cmt_partial(self, gen: int, db_label: str, rows: list) -> None:
+        """流式回填：某仓搜完立即追加显示（旧代际直接丢弃）。"""
+        if gen != getattr(self, "_search_gen", 0):
+            return
+        if rows:
+            self._sec_rows["cmt"].extend(rows)
+        n = len(self._sec_rows["cmt"])
+        self._stream_total = n
+        self.lbl_hint.configure(text=f"采集中…评论已出 {n} 条（{db_label} 完成）")
+        btn = self._sec_btns["cmt"]
+        try:
+            btn.configure(text=f"评论 {n}")
+        except tk.TclError:
+            pass
+        self.btn_export.configure(state="normal" if n else "disabled")
+        if self._active_sec == "cmt":
+            self._render_sec()
+
+    def _apply(self, results: dict | None, kw: str, limit: int, gen: int = 0) -> None:
+        # 旧搜索的终局结果直接丢弃
+        if gen and gen != getattr(self, "_search_gen", 0):
+            return
         self.btn_search.configure(state="normal", text="搜索")
         if results is None:
             self.lbl_hint.configure(text="搜索出错，详见日志")
@@ -357,11 +390,12 @@ class SearchPanel(ttk.Frame):
         self._render_sec()
 
     def _query(self, sources: dict, kw: str, start: str, end: str, limit: int,
-               exclude: str = "") -> dict:
+               exclude: str = "", cmt_cb=None) -> dict:
         out = {}
         if sources.get("cmt"):
             out["cmt"] = dao.search_comments(kw, start=start, end=end,
-                                             exclude=exclude, limit=limit)
+                                             exclude=exclude, limit=limit,
+                                             progress_cb=cmt_cb)
         if sources.get("dmk"):
             out["dmk"] = dao.search_danmaku(kw, start=start, end=end,
                                             exclude=exclude, limit=limit)

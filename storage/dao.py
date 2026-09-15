@@ -1929,7 +1929,12 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
     finally:
         conn.close()
 
-def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: str = "", limit: int = 100) -> dict:
+def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: str = "", limit: int = 100,
+                    progress_cb=None) -> dict:
+    """跨库搜评论。D 写缓冲最先查（全文索引秒出首屏），E 各仓随后逐仓回调。
+
+    progress_cb(db_label, rows): 每完成一仓立即回调，GUI 流式展示。
+    """
     keyword = (keyword or "").strip()
     if not keyword:
         return {"rows": [], "total": 0}
@@ -1938,16 +1943,22 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
     qlimit = 500000 if is_unlimited else limit
     dbs = _shard_dbs()
     all_rows = []
+    # D 写缓冲优先（全文索引，最快，先画首屏；以前只在 E 零命中才查 D）
+    try:
+        rows = _search_one_db("bilibili_data", "write", keyword, start, end, exclude, qlimit, keywords=kw_list)
+        all_rows.extend(rows)
+        if progress_cb:
+            try: progress_cb("D缓冲", rows)
+            except Exception: pass
+    except Exception:
+        pass
     for db in dbs:
         try:
             rows = _search_one_db(db, "read", keyword, start, end, exclude, qlimit, keywords=kw_list)
             all_rows.extend(rows)
-        except Exception:
-            pass
-    if not all_rows:
-        try:
-            rows = _search_one_db("bilibili_data", "write", keyword, start, end, exclude, qlimit, keywords=kw_list)
-            all_rows = rows
+            if progress_cb:
+                try: progress_cb(db, rows)
+                except Exception: pass
         except Exception:
             pass
     all_rows.sort(key=lambda r: r.get("ctime") or "", reverse=True)
