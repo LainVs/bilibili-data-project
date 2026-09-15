@@ -81,9 +81,14 @@ class BroadPanel(ttk.Frame):
         self.btn_lib_seed = ttk.Button(btns, text="从库内UP起采（10个）",
                                        command=self._seed_from_library)
         self.btn_lib_seed.pack(side="left", padx=6)
-        self.btn_hot_seed = ttk.Button(btns, text="从热搜UP起采（10个）",
+        self.btn_hot_seed = ttk.Button(btns, text="从热搜UP起采",
                                        command=self._seed_from_hot)
         self.btn_hot_seed.pack(side="left", padx=6)
+        ttk.Label(btns, text="个数:").pack(side="left", padx=(2, 0))
+        self.var_hot_seed = tk.StringVar(value="10")
+        self._vars["hot_seed_count"] = self.var_hot_seed
+        ttk.Spinbox(btns, from_=1, to=100, width=4,
+                    textvariable=self.var_hot_seed).pack(side="left")
         self.var_perpetual = tk.BooleanVar(value=False)
         ttk.Checkbutton(btns, text="永续采集", variable=self.var_perpetual).pack(side="left", padx=(12, 0))
         self.btn_pause = ttk.Button(btns, text="暂停", command=self._toggle_pause, state="disabled")
@@ -98,6 +103,7 @@ class BroadPanel(ttk.Frame):
         self.btn_hot.pack(side="left")
         ttk.Label(hot, text="数量:").pack(side="left", padx=(10, 2))
         self.var_hot = tk.StringVar(value=HOT_FIELD[2])
+        self._vars[HOT_FIELD[1]] = self.var_hot
         ttk.Spinbox(hot, from_=1, to=100, width=5,
                     textvariable=self.var_hot).pack(side="left")
 
@@ -360,16 +366,21 @@ class BroadPanel(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _seed_from_hot(self) -> None:
-        """从热搜起采：取热门榜视频的 UP 去重后填种子。"""
+        """从热搜起采：取热门榜视频的 UP 去重后填种子（个数 1-100 自选）。"""
+        try:
+            want = max(1, min(100, int(self.var_hot_seed.get())))
+        except ValueError:
+            messagebox.showerror("错误", "热搜UP个数需为整数")
+            return
         self.btn_hot_seed.configure(state="disabled", text="加载中…")
-        def worker() -> None:
+        def worker(want_n: int = want) -> None:
             try:
                 from crawler.api.client import ApiClient
                 from crawler.api.popular import PopularFetcher
                 client = ApiClient()
                 try:
                     fetcher = PopularFetcher(client)
-                    items = fetcher.collect(count=20)
+                    items = fetcher.collect(count=max(20, want_n * 2))
                 finally:
                     client.close()
                 uids = []
@@ -378,7 +389,7 @@ class BroadPanel(ttk.Frame):
                     uid = int(v.get("owner_uid") or 0)
                     if uid and uid not in seen:
                         seen.add(uid); uids.append(uid)
-                    if len(uids) >= 10:
+                    if len(uids) >= want_n:
                         break
                 if not uids:
                     raise RuntimeError("热搜未取到 UP")
@@ -393,7 +404,7 @@ class BroadPanel(ttk.Frame):
 
     def _seed_done(self, uids: list[int] | None, err: str | None, src: str = "lib") -> None:
         self.btn_lib_seed.configure(state="normal", text="从库内UP起采（10个）")
-        try: self.btn_hot_seed.configure(state="normal", text="从热搜UP起采（10个）")
+        try: self.btn_hot_seed.configure(state="normal", text="从热搜UP起采")
         except: pass
         if err or not uids:
             messagebox.showwarning("提示", err or "库内暂无已采集 UP")
