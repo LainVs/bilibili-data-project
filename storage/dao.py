@@ -34,6 +34,66 @@ def _r_strict():
     except Exception as exc:
         raise EArchiveOfflineError(f"E归档库离线: {exc}") from exc
 
+
+# 线程级读连接复用：同一线程内同 (role, db, 超时) 只建连一次，
+# ping(reconnect=True) 保活；短生命周期的线程结束时由 GC 回收。
+_tls = threading.local()
+
+
+def _open_conn(role: str, db: str, read_timeout: int):
+    import pymysql
+    from config import get_config
+    if role == "write":
+        base = getattr(get_config(), "mysql_write", get_config().mysql)
+    else:
+        base = getattr(get_config(), "mysql_archive", get_config().mysql)
+    return pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
+                           password=base["password"], database=db, charset=base["charset"],
+                           cursorclass=pymysql.cursors.DictCursor, connect_timeout=5,
+                           read_timeout=read_timeout)
+
+
+def _rcached(role: str, db: str, read_timeout: int = 120):
+    """取线程复用读连接；断线自动重连。调用方不关闭。"""
+    cache = getattr(_tls, "conns", None)
+    if cache is None:
+        cache = {}
+        _tls.conns = cache
+    key = (role, db, read_timeout)
+    conn = cache.get(key)
+    if conn is not None:
+        try:
+            conn.ping(reconnect=True)
+            return conn
+        except Exception:
+            try: conn.close()
+            except Exception: pass
+    conn = _open_conn(role, db, read_timeout)
+    cache[key] = conn
+    return conn
+
+
+def _drop_cached(role: str, db: str, read_timeout: int = 120) -> None:
+    """丢掉线程复用池里坏掉的连接，下次重建。"""
+    cache = getattr(_tls, "conns", None)
+    if not cache:
+        return
+    conn = cache.pop((role, db, read_timeout), None)
+    if conn is not None:
+        try: conn.close()
+        except Exception: pass
+
+
+def _rclose_all() -> None:
+    """关闭本线程全部复用读连接（如取消/收尾时调用，可选）。"""
+    cache = getattr(_tls, "conns", None)
+    if not cache:
+        return
+    for conn in list(cache.values()):
+        try: conn.close()
+        except Exception: pass
+    cache.clear()
+
 _SHARD_CACHE: dict = {"time": 0.0, "shards": [], "ok": False}
 _SHARD_TTL = 60.0
 
@@ -1111,33 +1171,21 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
             if stop_event is not None and stop_event.is_set():
                 raise StatsCancelled()
             try:
-                import pymysql
-                from config import get_config
-                cfg = get_config()
-                base = getattr(cfg, "mysql_archive", cfg.mysql)
-                conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
-                                       password=base["password"], database=db, charset=base["charset"],
-                                       cursorclass=pymysql.cursors.DictCursor, connect_timeout=5, read_timeout=120)
-                try:
-                    _one(conn, db, db)
-                finally:
-                    try: conn.close()
-                    except Exception: pass
+                conn = _rcached("archive", db, 120)
+                _one(conn, db, db)
             except Exception as e:
                 logger.warning(f"_count {db} 失败: {e} sql={sql[:60]}")
+                # 复用连接坏了就丢掉，下次重建，避免坏连接反复失败
+                _drop_cached("archive", db, 120)
                 failed.append(db)
         # D 写缓冲（SSD，快）
         if stop_event is not None and stop_event.is_set():
             raise StatsCancelled()
         try:
-            _dw = _w()
-            try:
-                _one(_dw, "bilibili_data", "D缓冲")
-            finally:
-                try: _dw.close()
-                except Exception: pass
+            _one(_rcached("write", "bilibili_data", 120), "bilibili_data", "D缓冲")
         except Exception as e:
             logger.warning(f"_count D缓冲 失败: {e} sql={sql[:60]}")
+            _drop_cached("write", "bilibili_data", 120)
             failed.append("D缓冲")
         if ok_any:
             return total, failed
@@ -2312,21 +2360,15 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
                 except: pass
 
     def _query_shard(db, sql, params):
-        """单仓查询，返回 rows"""
-        import pymysql
-        from config import get_config
-        cfg = get_config().mysql_archive
-        conn = pymysql.connect(host=cfg["host"], port=cfg["port"], user=cfg["user"],
-                               password=cfg["password"], database=db,
-                               charset=cfg["charset"],
-                               cursorclass=pymysql.cursors.DictCursor,
-                               connect_timeout=5, read_timeout=600)
+        """单仓查询，返回 rows（线程复用连接，跨榜只建连一次）。"""
         try:
+            conn = _rcached("archive", db, 600)
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return list(cur.fetchall())
-        finally:
-            conn.close()
+        except Exception:
+            _drop_cached("archive", db, 600)
+            raise
 
     def _merge_users(all_rows):
         merged = {}
