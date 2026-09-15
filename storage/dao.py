@@ -1133,6 +1133,7 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
         # users / comment_uids：global_uids/global_comment_uids 是唯一精确来源；
         # 即使 coverage 标记未覆盖（E 离线/新增仓未回填），只要表非空就用它，
         # 避免回退跨仓 dim_user 求和导致重复计数。
+        # E 离线时 global 读不出：用缓存全量兜底并标记，不显示回退的 D 库残数。
         if key in ("users", "comment_uids"):
             try:
                 if stop_event is not None and stop_event.is_set():
@@ -1146,7 +1147,17 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                 if ok:
                     logger.info("全局去重表为空，%s 回退老口径", key)
                 else:
-                    logger.info("E 离线，%s 回退老口径", key)
+                    logger.info("E 离线，%s 尝试缓存全量兜底", key)
+                    try:
+                        _cached = load_stats_cache() or {}
+                        _cv = int((_cached.get("stats") or {}).get(key) or 0)
+                    except Exception:
+                        _cv = 0
+                    if _cv > 0:
+                        out[key] = _cv
+                        with _failed_lock:
+                            out.setdefault("_partial", {})[key] = "E离线·缓存全量"
+                        return
             except StatsCancelled:
                 raise
             except Exception as exc:
@@ -1171,6 +1182,8 @@ def get_collection_stats(progress_cb=None, stop_event=None) -> dict:
                 with _failed_lock:
                     out.setdefault("_failed_shards", {})
                     out["_failed_shards"][key] = failed
+                    # 有仓缺失的残数必须标注，免得当成全量显示
+                    out.setdefault("_partial", {}).setdefault(key, "部分库缺失·非全量")
         except StatsCancelled:
             raise
         except Exception as exc:

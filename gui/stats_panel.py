@@ -168,20 +168,6 @@ class StatsPanel(ttk.Frame):
             self._rank_vars[key] = var
             ttk.Checkbutton(rank_row, text=label, variable=var).pack(side="left", padx=(6, 0))
 
-        # 排行榜勾选行
-        rank_row = ttk.Frame(wrap)
-        rank_row.grid(row=0, column=0, sticky="ew", pady=(0, 2))
-        # 放到筛选行下方（row=0 已被 top 占，用 grid row=0 但在 top 下面需要调整）
-        # 采用 pack 方式插入，放在 top 之后
-        ttk.Label(rank_row, text="刷新排行榜:", foreground="#666").pack(side="left")
-        self._rank_vars: dict[str, tk.BooleanVar] = {}
-        for key, label in [("top_users", "发言人"), ("top_texts", "重复文案"),
-                           ("top_liked", "最高赞"), ("top_videos", "热门视频"),
-                           ("top_ups", "热门UP")]:
-            var = tk.BooleanVar(value=True)
-            self._rank_vars[key] = var
-            ttk.Checkbutton(rank_row, text=label, variable=var).pack(side="left", padx=(6, 0))
-
         # 数据总览
         fm = ttk.LabelFrame(wrap, text="数据总览", padding=(10, 8))
         fm.grid(row=2, column=0, sticky="new", pady=(0, 8))
@@ -362,6 +348,15 @@ class StatsPanel(ttk.Frame):
                     except Exception:
                         pass
                 return
+            # 总览先行落缓存（不等几小时的排行榜）：全量无缺失才存，保留旧排行榜
+            try:
+                if (isinstance(stats, dict) and not stats.get("_failed_shards")
+                        and not stats.get("_partial")):
+                    _prev = dao.load_stats_cache() or {}
+                    dao.save_stats_cache({"stats": stats, "ranks": _prev.get("ranks"),
+                                          "time": now})
+            except Exception:
+                pass
             # 排行榜：逐个完成逐个回调 + 逐个落缓存
             ranks = {}
             partial_ranks = {}
@@ -518,8 +513,7 @@ class StatsPanel(ttk.Frame):
                 for lbl, _key in self._cells:
                     lbl.configure(text="-- 读取失败 --")
             else:
-                for lbl, key in self._cells:
-                    lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}")
+                self._fill_cells(stats)
             return
         self._set_updated(f"上次更新: {updated}" if updated else "")
         # 总览
@@ -527,8 +521,11 @@ class StatsPanel(ttk.Frame):
             for lbl, _key in self._cells:
                 lbl.configure(text="-- 读取失败 --")
         else:
-            for lbl, key in self._cells:
-                lbl.configure(text=f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}")
+            self._fill_cells(stats)
+            partial = stats.get("_partial") or {}
+            if partial:
+                self._set_updated(
+                    f"上次更新: {updated}　⚠ {len(partial)}项非全量（E离线/部分库缺失），连E后刷新")
         # 排行榜
         if not isinstance(ranks, dict):
             for key, tree in self._rank_trees.items():
@@ -543,6 +540,14 @@ class StatsPanel(ttk.Frame):
             for r in rows:
                 tree.insert("", "end", values=self._fmt_row(key, r))
             self._rank_cnts[key].configure(text=f"{len(rows)} 条")
+
+    def _fill_cells(self, stats: dict) -> None:
+        """填充总览格子；_partial 标注的项追加警告后缀。"""
+        partial = (stats.get("_partial") or {}) if isinstance(stats, dict) else {}
+        for lbl, key in self._cells:
+            base = f"{lbl.cget('text').split(':')[0]}: {stats.get(key, 0):,}"
+            mark = partial.get(key)
+            lbl.configure(text=f"{base}（{mark}）" if mark else base)
 
     def _apply_rank_partial(self, payload) -> None:
         """逐榜完成时的增量回填：只更新完成的那个榜的 Treeview。"""
