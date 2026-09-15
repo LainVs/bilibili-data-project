@@ -123,22 +123,25 @@ def _exec_global_insert(conn, sql, rows, batch: int = _GLOBAL_INSERT_BATCH):
     with conn.cursor() as cur:
         for i in range(0, len(rows), batch):
             cur.executemany(sql, rows[i:i + batch])
-        conn.commit()
+            conn.commit()
 
 
-def add_global_comment_uids(uids) -> int:
+def add_global_comment_uids(uids, *, conn=None) -> int:
     """直播喂数：评论者 uid 同时进 global_uids + global_comment_uids。
 
     E 离线静默跳过返回 0（归档 hook 会补，不抛异常、不进坏账）。
     小批量分批提交 + 全局写锁串行化，防止并发连接堆积。
+    conn 可选：传入则复用（调用方负责开关），不传则自建。
     """
     ids = {int(u) for u in (uids or []) if u}
     if not ids:
         return 0
     rows = [(i,) for i in ids]
     with _GLOBAL_WRITE_LOCK:
+        own = conn is None
         try:
-            conn = _r_strict()
+            if own:
+                conn = _r_strict()
         except EArchiveOfflineError:
             return 0
         except Exception as exc:
@@ -156,14 +159,16 @@ def add_global_comment_uids(uids) -> int:
             except Exception: pass
             return 0
         finally:
-            try: conn.close()
-            except Exception: pass
+            if own:
+                try: conn.close()
+                except Exception: pass
 
 
-def add_global_users(pairs) -> int:
+def add_global_users(pairs, *, conn=None) -> int:
     """直播喂数：(uid, uname) 进 global_uids。E 离线静默跳过。
 
     小批量分批提交 + 全局写锁串行化。
+    conn 可选：传入则复用（调用方负责开关），不传则自建。
     """
     rows = []
     for p in (pairs or []):
@@ -176,8 +181,10 @@ def add_global_users(pairs) -> int:
     if not rows:
         return 0
     with _GLOBAL_WRITE_LOCK:
+        own = conn is None
         try:
-            conn = _r_strict()
+            if own:
+                conn = _r_strict()
         except EArchiveOfflineError:
             return 0
         except Exception as exc:
@@ -193,8 +200,9 @@ def add_global_users(pairs) -> int:
             except Exception: pass
             return 0
         finally:
-            try: conn.close()
-            except Exception: pass
+            if own:
+                try: conn.close()
+                except Exception: pass
 
 
 def get_global_uid_count() -> tuple[int, bool]:
@@ -573,8 +581,8 @@ def upsert_video(videos: Iterable[dict]) -> None:
     _executemany(sql, rows)
 
 
-def upsert_danmaku(items: Iterable[dict]) -> int:
-    """幂等写入弹幕；返回受影响行数。"""
+def upsert_danmaku(items: Iterable[dict], *, conn=None) -> int:
+    """幂等写入弹幕；返回受影响行数。conn 可选复用。"""
     rows = [
         (d["id"], d["video_aid"], d.get("uid", 0), d.get("mid_hash", ""),
          d.get("content", ""), d.get("progress", 0.0), d.get("mode", 1),
@@ -591,13 +599,14 @@ def upsert_danmaku(items: Iterable[dict]) -> int:
             progress = VALUES(progress), ctime = VALUES(ctime),
             is_parsed = IF(is_parsed = 0 AND VALUES(uid) != 0, 1, is_parsed)
     """
-    return _executemany(sql, rows)
+    return _executemany(sql, rows, conn=conn)
 
 
-def upsert_comments(items: Iterable[dict]) -> int:
+def upsert_comments(items: Iterable[dict], *, conn=None) -> int:
     """幂等写入评论；返回受影响行数。
 
     item 内含 ref_type（默认 1=视频）与 video_aid（可为帖子 id）。
+    conn 可选复用（统计计数器共用同一连接）。
     """
     rows = [
         (c["rpid"], c["video_aid"], c.get("ref_type", 1), c.get("parent", 0), c.get("uid", 0),
@@ -614,19 +623,21 @@ def upsert_comments(items: Iterable[dict]) -> int:
             content = VALUES(content), like_num = VALUES(like_num),
             uid = VALUES(uid), ip_location = VALUES(ip_location)
     """
-    n = _executemany(sql, rows)
-    _sync_comment_counters(items)  # 统计物化：失败仅告警，不影响主写入
+    n = _executemany(sql, rows, conn=conn)
+    _sync_comment_counters(items, conn=conn)  # 统计物化：失败仅告警，不影响主写入
     return n
 
 
-def _sync_comment_counters(items: Iterable[dict]) -> None:
+def _sync_comment_counters(items: Iterable[dict], *, conn=None) -> None:
     """把本批评论的去重 UID / 对象ID 幂等写入统计计数表（无漂移风险）。"""
     try:
         uids = {c["uid"] for c in items if (c.get("uid") or 0) > 0}
         aids = {c["video_aid"] for c in items if (c.get("video_aid") or 0) > 0}
         if not uids and not aids:
             return
-        conn = _w()
+        own = conn is None
+        if own:
+            conn = _w()
         try:
             with conn.cursor() as cur:
                 if uids:
@@ -639,7 +650,8 @@ def _sync_comment_counters(items: Iterable[dict]) -> None:
                         [(a,) for a in aids])
             conn.commit()
         finally:
-            conn.close()
+            if own:
+                conn.close()
     except Exception as exc:
         logger.warning("评论统计计数同步失败: %s", exc)
 
@@ -745,8 +757,8 @@ def get_max_comment_ctime(video_aid: int, ref_type: int = 1) -> int:
         conn.close()
 
 
-def upsert_users(items: Iterable[dict]) -> int:
-    """写用户维度（从评论/反查得到的用户信息）。"""
+def upsert_users(items: Iterable[dict], *, conn=None) -> int:
+    """写用户维度（从评论/反查得到的用户信息）。conn 可选复用。"""
     rows = [
         (u["uid"], u.get("uname", ""), u.get("level", 0), u.get("sex", ""),
          u.get("is_vip", 0), u.get("signature", ""), int(u.get("fans", 0) or 0))
@@ -762,7 +774,7 @@ def upsert_users(items: Iterable[dict]) -> int:
             is_vip = VALUES(is_vip), signature = VALUES(signature),
             fans = IF(VALUES(fans) > 0, VALUES(fans), fans)
     """
-    return _executemany(sql, rows)
+    return _executemany(sql, rows, conn=conn)
 
 
 def get_crc_cache(mid_hash: str) -> dict | None:
@@ -1787,19 +1799,24 @@ def find_video_by_bvid(bvid: str) -> dict | None:
         conn.close()
 
 
-def _executemany(sql: str, rows: list[tuple]) -> int:
-    """幂等批量写入：按 _WRITE_BATCH 分批、进程内串行、死锁自动重试。"""
+def _executemany(sql: str, rows: list[tuple], *, conn=None) -> int:
+    """幂等批量写入：按 _WRITE_BATCH 分批、进程内串行、死锁自动重试。
+    conn 可选复用（调用方负责开关）；复用时重试前先 rollback。
+    """
     total = 0
     for i in range(0, len(rows), _WRITE_BATCH):
-        total += _exec_map_chunk(sql, rows[i:i + _WRITE_BATCH])
+        total += _exec_map_chunk(sql, rows[i:i + _WRITE_BATCH], conn=conn)
     return total
 
 
-def _exec_map_chunk(sql: str, rows: list[tuple]) -> int:
-    """单批写入 D库，失败按错误码重试（事务未提交，可安全重发）。"""
+def _exec_map_chunk(sql: str, rows: list[tuple], *, conn=None) -> int:
+    """单批写入 D库，失败按错误码重试（事务未提交，可安全重发）。
+    conn 可选复用：复用时不开关连接，重试前 rollback 本批。"""
     with _WRITE_LOCK:
+        own = conn is None
         for attempt in range(_MAX_RETRY + 1):
-            conn = _w()
+            if own:
+                conn = _w()
             try:
                 with conn.cursor() as cur:
                     affected = cur.executemany(sql, rows)
@@ -1810,13 +1827,21 @@ def _exec_map_chunk(sql: str, rows: list[tuple]) -> int:
                 if errno in _RETRYABLE_ERRS and attempt < _MAX_RETRY:
                     logger.warning("写入冲突(%s)，重试 %d/%d: %s",
                                    errno, attempt + 1, _MAX_RETRY, sql.split()[2:4])
+                    try: conn.rollback()
+                    except Exception: pass
+                    if own:
+                        try: conn.close()
+                        except Exception: pass
+                        conn = None
                     continue
                 raise
             finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                if own and conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    conn = None
         return 0
 
 

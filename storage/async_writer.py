@@ -189,45 +189,76 @@ class AsyncDbWriter:
     def _commit(self, comments, danmaku, users) -> None:
         """批量落库；失败进坏账（计数+留样+落文件），不静默丢整批。
 
+        D/E 各复用一个连接（本轮内不开新连接）；E 连不上则跳过直播喂数。
         成功后顺手把 uid 直播喂进 E 全局去重表（best-effort，E 离线自跳，
         归档 hook 会补，不影响主链）。
         """
+        dw = None
         try:
-            if danmaku:
-                dao.upsert_danmaku(danmaku)
+            dw = dao._w()
         except Exception as exc:
-            self._dead_letter("danmaku", danmaku, exc)
+            logger.warning("D 写连接失败，本轮转坏账: %s", exc)
+        er = None
+        if dw is not None:
+            try:
+                er = dao._r_strict()
+            except Exception:
+                er = None  # E 离线：直播喂数跳过，归档 hook 补
         try:
+            try:
+                if danmaku:
+                    if dw is None:
+                        raise RuntimeError("D 写连接不可用")
+                    dao.upsert_danmaku(danmaku, conn=dw)
+            except Exception as exc:
+                self._dead_letter("danmaku", danmaku, exc)
+            try:
+                if comments:
+                    if dw is None:
+                        raise RuntimeError("D 写连接不可用")
+                    dao.upsert_comments(comments, conn=dw)
+                    if er is not None:
+                        try:
+                            dao.add_global_comment_uids([c.get("uid", 0) for c in comments
+                                                          if isinstance(c, dict)], conn=er)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                self._dead_letter("comments", comments, exc)
             if comments:
-                dao.upsert_comments(comments)
                 try:
-                    dao.add_global_comment_uids([c.get("uid", 0) for c in comments
-                                                 if isinstance(c, dict)])
-                except Exception:
-                    pass
-        except Exception as exc:
-            self._dead_letter("comments", comments, exc)
-        if comments:
-            try:
-                recs = build_user_records(comments, [])
-                dao.upsert_users(recs)
+                    recs = build_user_records(comments, [])
+                    if dw is None:
+                        raise RuntimeError("D 写连接不可用")
+                    dao.upsert_users(recs, conn=dw)
+                    if er is not None:
+                        try:
+                            dao.add_global_users([(r.get("uid", 0), r.get("uname", ""))
+                                                  for r in recs if isinstance(r, dict)], conn=er)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    try:
+                        self._dead_letter("users", build_user_records(comments, []), exc)
+                    except Exception:
+                        logger.warning("用户维度写入失败: %s", exc)
+            if users:
                 try:
-                    dao.add_global_users([(r.get("uid", 0), r.get("uname", ""))
-                                          for r in recs if isinstance(r, dict)])
-                except Exception:
-                    pass
-            except Exception as exc:
-                try:
-                    self._dead_letter("users", build_user_records(comments, []), exc)
-                except Exception:
-                    logger.warning("用户维度写入失败: %s", exc)
-        if users:
-            try:
-                dao.upsert_users(users)
-                try:
-                    dao.add_global_users([(u.get("uid", 0), u.get("uname", ""))
-                                          for u in users if isinstance(u, dict)])
-                except Exception:
-                    pass
-            except Exception as exc:
-                self._dead_letter("users", users, exc)
+                    if dw is None:
+                        raise RuntimeError("D 写连接不可用")
+                    dao.upsert_users(users, conn=dw)
+                    if er is not None:
+                        try:
+                            dao.add_global_users([(u.get("uid", 0), u.get("uname", ""))
+                                                  for u in users if isinstance(u, dict)], conn=er)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    self._dead_letter("users", users, exc)
+        finally:
+            if dw is not None:
+                try: dw.close()
+                except Exception: pass
+            if er is not None:
+                try: er.close()
+                except Exception: pass
