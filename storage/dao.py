@@ -2379,12 +2379,12 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
     def _query_shard(db, sql, params):
         """单仓查询，返回 rows（线程复用连接，跨榜只建连一次）。"""
         try:
-            conn = _rcached("archive", db, 600)
+            conn = _rcached("archive", db, 180)
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return list(cur.fetchall())
         except Exception:
-            _drop_cached("archive", db, 600)
+            _drop_cached("archive", db, 180)
             raise
 
     def _merge_users(all_rows):

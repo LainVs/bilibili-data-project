@@ -15,6 +15,8 @@ class UserQueryPanel(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
         self._rows: dict[str, dict] = {}  # iid -> 完整原始行
+        self._qgen = 0  # 查询代际：旧查询的慢结果直接丢弃
+        self._last_uid = 0
         self._build_ui()
 
     # ---------------- 会话状态（重启恢复） ----------------
@@ -44,8 +46,10 @@ class UserQueryPanel(ttk.Frame):
         ttk.Button(top, text="查询", command=self._query).pack(side="left", padx=(8, 0))
         self.btn_export = ttk.Button(top, text="导出CSV", command=self._export, state="disabled")
         self.btn_export.pack(side="left", padx=8)
-        self.var_limit = tk.StringVar(value="0")
-        ttk.Label(top, text="条数(0=无限):").pack(side="left", padx=(14, 0))
+        self.btn_export_all = ttk.Button(top, text="导出全部", command=self._export_all, state="disabled")
+        self.btn_export_all.pack(side="left", padx=2)
+        self.var_limit = tk.StringVar(value="2000")
+        ttk.Label(top, text="条数(0=无限，默认2000):").pack(side="left", padx=(14, 0))
         ttk.Spinbox(top, from_=0, to=100000, textvariable=self.var_limit, width=7).pack(side="left")
 
         # 用户信息
@@ -93,13 +97,16 @@ class UserQueryPanel(ttk.Frame):
             self.tree.delete(item)
         self._rows.clear()
         self.lbl_user.configure(text="查询中...")
+        self._qgen += 1
+        my_gen = self._qgen
+        self._last_uid = uid
 
         def worker():
             try:
                 user = dao.query_user(uid)
                 comments = dao.query_comments_by_uid(uid, limit)
                 danmaku = dao.query_danmaku_by_uid(uid, limit)
-                self.after(0, lambda: self._apply_user(uid, user, comments, danmaku))
+                self.after(0, lambda: self._apply_user(my_gen, uid, user, comments, danmaku))
             except Exception as exc:
                 self.after(0, lambda: messagebox.showerror("查询失败", str(exc)))
         import threading
@@ -137,7 +144,9 @@ class UserQueryPanel(ttk.Frame):
         self.lbl_count.configure(text=f"共 {len(comments) + len(danmaku)} 条（评论 {len(comments)} / 弹幕 {len(danmaku)}）")
         self.btn_export.configure(state="normal" if self._rows else "disabled")
 
-    def _apply_user(self, uid: int, user: dict | None, comments: list, danmaku: list) -> None:
+    def _apply_user(self, gen: int, uid: int, user: dict | None, comments: list, danmaku: list) -> None:
+        if gen != self._qgen:
+            return  # 旧查询结果丢弃
         try:
             from gui.util import ping_main as _ping
             _ping(self, "用户查询")
@@ -195,6 +204,42 @@ class UserQueryPanel(ttk.Frame):
             messagebox.showinfo("导出完成", f"已导出 {len(self._rows)} 条记录\n{path}")
         except OSError as exc:
             messagebox.showerror("导出失败", f"写入文件时出错：{exc}")
+
+    def _export_all(self) -> None:
+        """后台导出：重新查全量（无 limit）并写入 CSV。"""
+        try:
+            uid = self._last_uid
+        except (ValueError, TypeError):
+            messagebox.showerror("错误", "请先查询一个用户")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出该用户全部记录", defaultextension=".csv",
+            filetypes=[("CSV 文件", "*.csv"), ("文本文件", "*.txt")],
+        )
+        if not path:
+            return
+        self.btn_export_all.configure(state="disabled", text="导出中...")
+        gen = self._qgen
+
+        def worker():
+            try:
+                comments = dao.query_comments_by_uid(uid, 0)
+                danmaku = dao.query_danmaku_by_uid(uid, 0)
+                import csv
+                with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                    w = csv.writer(f)
+                    w.writerow(["类型", "时间", "视频BV", "所属UP", "视频标题", "内容", "属地", "点赞", "播放进度(秒)", "完整内容"])
+                    for c in comments:
+                        w.writerow(["评论", fmt_dt(c.get("ctime")), c.get("bvid", ""), c.get("owner_name", "") or "", c.get("title", "") or "", str(c.get("content", ""))[:200], c.get("ip_location", "") or "", c.get("like_num", ""), "", c.get("content", "")])
+                    for d in danmaku:
+                        w.writerow(["弹幕", fmt_dt(d.get("ctime")), d.get("bvid", ""), d.get("owner_name", "") or "", d.get("title", "") or "", str(d.get("content", ""))[:200], "", "", float(d.get("progress", 0) or 0), d.get("content", "")])
+                self.after(0, lambda: messagebox.showinfo("导出完成", f"已导出 {len(comments) + len(danmaku)} 条\n{path}") if gen == self._qgen else None)
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("导出失败", str(exc)) if gen == self._qgen else None)
+            finally:
+                self.after(0, lambda: self.btn_export_all.configure(state="normal", text="导出全部"))
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- 完整内容弹窗 ----------------
     def _on_double_click(self, event) -> None:
