@@ -2223,55 +2223,15 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
     """
     tc, tp = _time_cond("c.ctime", start, end)
     out: dict[str, list[dict]] = {}
-
-    # 5 榜定义
-    all_jobs = {
-        "top_users": (
-            "SELECT t.uid, MAX(COALESCE(u.uname, CAST(t.uid AS CHAR))) AS uname, t.cnt "
-            "FROM (SELECT c.uid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.uid > 0 GROUP BY c.uid ORDER BY cnt DESC LIMIT %s) t "
-            "LEFT JOIN dim_user u ON u.uid = t.uid GROUP BY t.uid, t.cnt ORDER BY t.cnt DESC",
-            [top], _merge_users),
-        "top_texts": (
-            "SELECT content, COUNT(*) AS cnt, COUNT(DISTINCT uid) AS senders, "
-            "CHAR_LENGTH(content) AS tlen FROM raw_comments "
-            "WHERE content IS NOT NULL AND content != '' "
-            "AND ctime >= DATE_SUB(NOW(), INTERVAL 30 DAY) "
-            + (" AND CHAR_LENGTH(content) >= %s" if min_text_len > 0 else "")
-            + " GROUP BY content ORDER BY cnt DESC LIMIT %s",
-            [*([min_text_len] if min_text_len > 0 else []), top], _merge_texts),
-        "top_liked": (
-            "SELECT c.rpid, c.uid, COALESCE(u.uname,'') AS uname, c.content, "
-            "c.like_num, c.ctime, c.ip_location, v.bvid, v.title, v.owner_name "
-            "FROM raw_comments c LEFT JOIN dim_user u ON u.uid=c.uid "
-            "LEFT JOIN meta_video v ON v.aid=c.video_aid "
-            "WHERE c.like_num > 0 ORDER BY c.like_num DESC LIMIT %s",
-            [top], lambda rows: sorted(rows, key=lambda x: int(x.get("like_num",0) or 0), reverse=True)[:100]),
-        "top_videos": (
-            "SELECT t.aid, v.bvid, v.title, v.owner_name, t.cnt "
-            "FROM (SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.video_aid > 0 GROUP BY c.video_aid ORDER BY cnt DESC LIMIT %s) t "
-            "LEFT JOIN meta_video v ON v.aid=t.aid ORDER BY t.cnt DESC",
-            [top], _merge_videos),
-        "top_ups": (
-            "SELECT v.owner_uid AS uid, MAX(COALESCE(v.owner_name,'')) AS uname, "
-            "SUM(g.cnt) AS cnt FROM "
-            "(SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.video_aid > 0 GROUP BY c.video_aid) g "
-            "JOIN meta_video v ON v.aid=g.aid WHERE v.owner_uid > 0 "
-            "GROUP BY v.owner_uid ORDER BY cnt DESC LIMIT %s",
-            [top], _merge_ups),
-    }
-    jobs = [(k, *all_jobs[k]) for k in (which or list(all_jobs.keys()))]
-    total_jobs = len(jobs)
     done_count = [0]
+    total_jobs = [0]  # jobs 建好后赋值（_report 调用时已就绪）
     lock = threading.Lock()
 
     def _report():
         with lock:
             done_count[0] += 1
             if progress_cb:
-                try: progress_cb(done_count[0], total_jobs)
+                try: progress_cb(done_count[0], total_jobs[0])
                 except: pass
 
     def _query_shard(db, sql, params):
@@ -2339,6 +2299,47 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
                                    "tlen": int(r.get("tlen", 0) or 0)}
         lst = sorted(merged.values(), key=lambda x: x["cnt"], reverse=True)
         return lst[:100]
+
+    # 5 榜定义（必须放在 _merge_* 之后，字典求值时它们已存在）
+    all_jobs = {
+        "top_users": (
+            "SELECT t.uid, MAX(COALESCE(u.uname, CAST(t.uid AS CHAR))) AS uname, t.cnt "
+            "FROM (SELECT c.uid, COUNT(*) AS cnt FROM raw_comments c "
+            "WHERE c.uid > 0 GROUP BY c.uid ORDER BY cnt DESC LIMIT %s) t "
+            "LEFT JOIN dim_user u ON u.uid = t.uid GROUP BY t.uid, t.cnt ORDER BY t.cnt DESC",
+            [top], _merge_users),
+        "top_texts": (
+            "SELECT content, COUNT(*) AS cnt, COUNT(DISTINCT uid) AS senders, "
+            "CHAR_LENGTH(content) AS tlen FROM raw_comments "
+            "WHERE content IS NOT NULL AND content != '' "
+            "AND ctime >= DATE_SUB(NOW(), INTERVAL 30 DAY) "
+            + (" AND CHAR_LENGTH(content) >= %s" if min_text_len > 0 else "")
+            + " GROUP BY content ORDER BY cnt DESC LIMIT %s",
+            [*([min_text_len] if min_text_len > 0 else []), top], _merge_texts),
+        "top_liked": (
+            "SELECT c.rpid, c.uid, COALESCE(u.uname,'') AS uname, c.content, "
+            "c.like_num, c.ctime, c.ip_location, v.bvid, v.title, v.owner_name "
+            "FROM raw_comments c LEFT JOIN dim_user u ON u.uid=c.uid "
+            "LEFT JOIN meta_video v ON v.aid=c.video_aid "
+            "WHERE c.like_num > 0 ORDER BY c.like_num DESC LIMIT %s",
+            [top], lambda rows: sorted(rows, key=lambda x: int(x.get("like_num",0) or 0), reverse=True)[:100]),
+        "top_videos": (
+            "SELECT t.aid, v.bvid, v.title, v.owner_name, t.cnt "
+            "FROM (SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
+            "WHERE c.video_aid > 0 GROUP BY c.video_aid ORDER BY cnt DESC LIMIT %s) t "
+            "LEFT JOIN meta_video v ON v.aid=t.aid ORDER BY t.cnt DESC",
+            [top], _merge_videos),
+        "top_ups": (
+            "SELECT v.owner_uid AS uid, MAX(COALESCE(v.owner_name,'')) AS uname, "
+            "SUM(g.cnt) AS cnt FROM "
+            "(SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
+            "WHERE c.video_aid > 0 GROUP BY c.video_aid) g "
+            "JOIN meta_video v ON v.aid=g.aid WHERE v.owner_uid > 0 "
+            "GROUP BY v.owner_uid ORDER BY cnt DESC LIMIT %s",
+            [top], _merge_ups),
+    }
+    jobs = [(k, *all_jobs[k]) for k in (which or list(all_jobs.keys()))]
+    total_jobs[0] = len(jobs)
 
     def _run_ranking(key, sql, params, merge_fn):
         """单榜：串行跑全仓，合并结果；取消时查完当前仓即停"""
