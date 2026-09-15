@@ -325,6 +325,11 @@ class StatsPanel(ttk.Frame):
             which = [k for k, v in self._rank_vars.items() if v.get()]
             rank_count = len(which)
             rank_done_idx = [0]
+            def _stat_done(key, value, mark=None):
+                try:
+                    self._stats_q.put(("stat_partial", key, value, mark))
+                except Exception:
+                    pass
             try:
                 def _prog10(d, t):
                     name = STAT_NAMES[d-1] if 1 <= d <= len(STAT_NAMES) else f"总览 {d}/{t}"
@@ -363,11 +368,6 @@ class StatsPanel(ttk.Frame):
             # 排行榜：逐个完成逐个回调 + 逐个落缓存
             ranks = {}
             partial_ranks = {}
-            def _stat_done(key, value, mark=None):
-                try:
-                    self._stats_q.put(("stat_partial", key, value, mark))
-                except Exception:
-                    pass
             def _rank_done(key, rows):
                 ranks[key] = rows
                 partial_ranks[key] = rows
