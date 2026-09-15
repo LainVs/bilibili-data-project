@@ -22,7 +22,7 @@ from storage import dao
 
 logger = logging.getLogger(__name__)
 
-_COMMIT_BATCH = 200
+_COMMIT_BATCH = 800
 
 # 活跃写线程注册表：close(wait=False) 后采集线程已返回，但写线程仍在
 # 排空队列；强引用防止 writer 被 GC（daemon 写线程随之中断丢数据），
@@ -97,7 +97,7 @@ class AsyncDbWriter:
                 self._cv.notify()
 
     # ---- 收集侧控制 ----
-    def flush(self, timeout: float = 30.0) -> None:
+    def flush(self, timeout: float = 60.0) -> None:
         """通知写线程把剩余批次写完，并等队列落空后返回。"""
         with self._lock:
             self._cv.notify_all()

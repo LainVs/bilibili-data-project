@@ -142,8 +142,9 @@ logger = logging.getLogger(__name__)
 # 进程内写互斥：采集线程并发批插相同主键（如 dim_user 同 uid）会互相持锁
 # 等待形成死锁风暴（曾拖垮整库）。串行化后锁冲突归零，吞吐影响可忽略。
 _WRITE_LOCK = threading.RLock()
-# 单事务最大行数：避免超大事务把 InnoDB 全文索引同步/undo 一次性憋大。
-_WRITE_BATCH = 500
+# 单事务最大行数：D 是 SSD，2000 行一批经实测可承受；
+# 过大仍会憋大 undo/全文索引同步，故不无限放大。
+_WRITE_BATCH = 2000
 # 可安全重试的 MySQL 错误码：死锁 / 锁等待超时 / 连接被重置（事务未提交可重发）。
 _RETRYABLE_ERRS = (1213, 1205, 2006, 2013)
 _MAX_RETRY = 2
@@ -2303,20 +2304,36 @@ def search_videos(keyword: str, *, start: str = "", end: str = "",
                 conditions.append("FROM_UNIXTIME(v.pubdate) <= %s")
                 params.append(end)
             where = " AND ".join(conditions)
-            sql = (
+            # 三步走（原来每行两次相关子查询，limit=50 即 100 次点查，N+1）：
+            # 1) LIKE 筛出命中视频；2) 两次 GROUP BY 聚合评论/弹幕数；3) Python 合并
+            cur.execute(
                 "SELECT v.aid, v.bvid, v.title, v.owner_uid, v.owner_name, v.pubdate, "
-                "       v.part, "
-                "       (SELECT COUNT(*) FROM raw_comments c WHERE c.video_aid = v.aid) AS comment_count, "
-                "       (SELECT COUNT(*) FROM raw_danmaku d WHERE d.video_aid = v.aid) AS danmaku_count "
+                "       v.part "
                 "FROM meta_video v "
                 f"WHERE {where} "
-                "ORDER BY v.pubdate DESC LIMIT %s"
-            )
-            cur.execute(sql, [*params, limit + 1])
-            rows = list(cur.fetchall())
-            truncated = len(rows) > limit
-            return {"rows": rows[:limit],
-                    "total": None if truncated else len(rows)}
+                "ORDER BY v.pubdate DESC LIMIT %s",
+                [*params, limit + 1])
+            videos = list(cur.fetchall())
+            truncated = len(videos) > limit
+            videos = videos[:limit]
+            aids = [int(v["aid"]) for v in videos if v.get("aid")]
+            cc: dict = {}
+            dc: dict = {}
+            if aids:
+                fmt = ",".join(["%s"] * len(aids))
+                cur.execute(
+                    f"SELECT video_aid AS aid, COUNT(*) AS n FROM raw_comments "
+                    f"WHERE video_aid IN ({fmt}) GROUP BY video_aid", tuple(aids))
+                cc = {int(r["aid"]): int(r["n"]) for r in cur.fetchall()}
+                cur.execute(
+                    f"SELECT video_aid AS aid, COUNT(*) AS n FROM raw_danmaku "
+                    f"WHERE video_aid IN ({fmt}) GROUP BY video_aid", tuple(aids))
+                dc = {int(r["aid"]): int(r["n"]) for r in cur.fetchall()}
+            for v in videos:
+                v["comment_count"] = cc.get(int(v.get("aid") or 0), 0)
+                v["danmaku_count"] = dc.get(int(v.get("aid") or 0), 0)
+            return {"rows": videos,
+                    "total": None if truncated else len(videos)}
     finally:
         conn.close()
 
