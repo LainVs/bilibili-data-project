@@ -36,6 +36,7 @@ class SearchPanel(ttk.Frame):
         self._font_size = 10
         self._last_results: dict = {}
         self._last_kw = ""
+        self._last_min_like = 0
         self._sec_rows: dict[str, list[dict]] = {"cmt": [], "dmk": [], "video": []}
         self._list_iids: dict[str, dict] = {}  # iid -> 完整行（用于双击详情）
         self._build_ui()
@@ -69,10 +70,14 @@ class SearchPanel(ttk.Frame):
             "var_end": self.var_end.get(),
             "var_limit": self.var_limit.get(),
             "var_exclude": self.var_exclude.get(),
+            "var_min_like": self.var_min_like.get(),
+            "var_sort": self.var_sort.get(),
+            "history": list(getattr(self, "_history", [])[:20]),
         }
 
     def restore_state(self, d: dict) -> None:
-        for name in ("var_kw", "var_start", "var_end", "var_limit", "var_exclude"):
+        for name in ("var_kw", "var_start", "var_end", "var_limit", "var_exclude",
+                     "var_min_like", "var_sort"):
             val = d.get(name)
             if isinstance(val, str):
                 try:
@@ -85,6 +90,13 @@ class SearchPanel(ttk.Frame):
                     getattr(self, name).set(bool(d.get(name)))
                 except (AttributeError, tk.TclError):
                     pass
+        hist = d.get("history")
+        if isinstance(hist, list):
+            self._history = [str(h) for h in hist if str(h).strip()][:20]
+            try:
+                self.cbo_kw.configure(values=self._history)
+            except (AttributeError, tk.TclError):
+                pass
 
     # ---------------- 界面 ----------------
     def _build_ui(self) -> None:
@@ -92,13 +104,15 @@ class SearchPanel(ttk.Frame):
         self.rowconfigure(2, weight=1)
 
         # 查询条件行
+        self._history: list[str] = list(getattr(self, "_history", []) or [])
         top = ttk.Frame(self, padding=(6, 6))
         top.grid(row=0, column=0, sticky="ew")
         ttk.Label(top, text="关键词:").pack(side="left")
         self.var_kw = tk.StringVar()
-        kw = ttk.Entry(top, textvariable=self.var_kw, width=28)
-        kw.pack(side="left", padx=(2, 8))
-        kw.bind("<Return>", lambda _e: self._search())
+        self.cbo_kw = ttk.Combobox(top, textvariable=self.var_kw, width=26,
+                                   values=self._history)
+        self.cbo_kw.pack(side="left", padx=(2, 8))
+        self.cbo_kw.bind("<Return>", lambda _e: self._search())
 
         self.var_in_c = tk.BooleanVar(value=True)
         self.var_in_d = tk.BooleanVar(value=True)
@@ -113,10 +127,21 @@ class SearchPanel(ttk.Frame):
         ttk.Label(top, text="至:").pack(side="left")
         self.var_end = tk.StringVar()
         ttk.Entry(top, textvariable=self.var_end, width=11).pack(side="left", padx=2)
+        # 快捷时间：一点即填起止，免手输格式
+        ttk.Button(top, text="全部", width=4, command=self._quick_all).pack(side="left", padx=(4, 0))
+        ttk.Button(top, text="近7天", width=5, command=lambda: self._quick_days(7)).pack(side="left")
+        ttk.Button(top, text="近30天", width=6, command=lambda: self._quick_days(30)).pack(side="left")
+        ttk.Button(top, text="今年", width=4, command=self._quick_year).pack(side="left")
 
-        self.var_limit = tk.StringVar(value="0")
+        self.var_limit = tk.StringVar(value="200")
         ttk.Label(top, text="每分区条数(0=无限):").pack(side="left", padx=(10, 0))
         ttk.Spinbox(top, from_=0, to=100000, textvariable=self.var_limit, width=7).pack(side="left")
+        self.var_min_like = tk.StringVar(value="0")
+        ttk.Label(top, text="最低赞:").pack(side="left", padx=(8, 0))
+        ttk.Spinbox(top, from_=0, to=1000000, textvariable=self.var_min_like, width=6).pack(side="left")
+        self.var_sort = tk.StringVar(value="时间倒序")
+        ttk.Combobox(top, textvariable=self.var_sort, width=8, state="readonly",
+                     values=["时间倒序", "点赞倒序"]).pack(side="left", padx=(8, 0))
         self.btn_search = ttk.Button(top, text="搜索", command=self._search)
         self.btn_search.pack(side="left", padx=(10, 0))
         self.btn_export = ttk.Button(top, text="导出命中CSV", command=self._export,
@@ -127,10 +152,10 @@ class SearchPanel(ttk.Frame):
         tip.grid(row=1, column=0, sticky="ew", padx=8)
         ttk.Label(tip, text="排除词(逗号分隔):", foreground="#888").pack(side="left")
         self.var_exclude = tk.StringVar()
-        ttk.Entry(tip, textvariable=self.var_exclude, width=30).pack(side="left", padx=(2, 8))
-        ttk.Label(tip, text="排除含这些词的评论/弹幕（如搜“国男”填“中国男,外国男”去掉子串误伤）",
+        ttk.Entry(tip, textvariable=self.var_exclude, width=24).pack(side="left", padx=(2, 8))
+        ttk.Label(tip, text="空格=同时含 · OR=任一含 · \"引号\"=精确短语（如：主龙 OR 白厄 / \"绝望的救世主\"）",
                   foreground="#888").pack(side="left")
-        ttk.Label(tip, text="时间格式如 2024-01-01 或 2024-01-01 00:00 (可留空)",
+        ttk.Label(tip, text="时间格式 2024-01-01（可留空）",
                   foreground="#888").pack(side="right", padx=(6, 0))
 
         # 主体：左侧结果区 + 右侧边栏
@@ -230,11 +255,51 @@ class SearchPanel(ttk.Frame):
             foreground="#888", justify="left", wraplength=110)
         mdl_label.pack(pady=(14, 0), padx=4)
 
-        self.lbl_hint = ttk.Label(self, text="输入关键词后按回车或点搜索。多个关键词用逗号分隔（如：烂片,剧情差）表示全部都要包含。",
+        self.lbl_hint = ttk.Label(self, text="输入关键词后按回车或点搜索。空格=同时含（如：烂片 剧情差），OR=任一含（如：主龙 OR 白厄），\"引号\"=精确短语。",
                                   foreground="#b36")
         self.lbl_hint.grid(row=3, column=0, sticky="w", padx=8)
         self._fresh_sec_view()
         self._render_section_title()
+
+    # ---------------- 快捷时间 / 历史 ----------------
+    def _quick_all(self) -> None:
+        self.var_start.set("")
+        self.var_end.set("")
+
+    def _quick_days(self, days: int) -> None:
+        from datetime import datetime, timedelta
+        end = datetime.now()
+        start = end - timedelta(days=days)
+        self.var_start.set(start.strftime("%Y-%m-%d"))
+        self.var_end.set(end.strftime("%Y-%m-%d %H:%M"))
+
+    def _quick_year(self) -> None:
+        from datetime import datetime
+        now = datetime.now()
+        self.var_start.set(f"{now.year}-01-01")
+        self.var_end.set(now.strftime("%Y-%m-%d %H:%M"))
+
+    def _push_history(self, kw: str) -> None:
+        kw = (kw or "").strip()
+        if not kw:
+            return
+        hist = [h for h in getattr(self, "_history", []) if h != kw]
+        hist.insert(0, kw)
+        self._history = hist[:20]
+        try:
+            self.cbo_kw.configure(values=self._history)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _sorted(self, rows: list[dict], sec: str) -> list[dict]:
+        """按当前排序下拉对结果内存排序（点赞倒序仅评论/视频有效）。"""
+        if self.var_sort.get() == "点赞倒序":
+            if sec == "dmk":
+                return rows
+            key = "like_num" if sec == "cmt" else "comment_count"
+            return sorted(rows, key=lambda r: (int(r.get(key) or 0), str(r.get("ctime") or "")),
+                          reverse=True)
+        return rows
 
     # ---------------- 视图状态 ----------------
     def _set_sec(self, sec: str) -> None:
@@ -282,10 +347,17 @@ class SearchPanel(ttk.Frame):
         if not kw:
             messagebox.showwarning("提示", "请输入关键词")
             return
+        if not self.var_in_c.get() and not self.var_in_d.get() and not self.var_in_v.get():
+            messagebox.showwarning("提示", "请至少勾选一个来源（评论/弹幕/视频）")
+            return
         try:
             limit = int(self.var_limit.get())
         except ValueError:
-            limit = 3000
+            limit = 200
+        try:
+            min_like = max(0, int(self.var_min_like.get()))
+        except ValueError:
+            min_like = 0
         start = self.var_start.get().strip()
         end = self.var_end.get().strip()
         if start and end and start > end:
@@ -294,9 +366,16 @@ class SearchPanel(ttk.Frame):
         exclude = self.var_exclude.get().strip()
         sources = {"cmt": self.var_in_c.get(), "dmk": self.var_in_d.get(),
                    "video": self.var_in_v.get()}
+        # 危险组合二次确认：单字词全表扫描 + 无限量，多仓跑起来很慢
+        from storage.dao import parse_smart_query, flatten_smart_query
+        _terms = flatten_smart_query(parse_smart_query(kw))
+        if _terms and all(len(t) < 2 for t in _terms) and (not limit or limit <= 0):
+            if not messagebox.askyesno("确认", "单字关键词 + 无限条数会全表扫描所有分仓，可能很慢。\n"
+                                                "建议改成每分区200条或用2字以上关键词。\n\n仍要继续吗？"):
+                return
 
         hint = "搜索中…"
-        if len(kw) < 2:
+        if _terms and all(len(t) < 2 for t in _terms):
             hint = "单字关键词走全表扫描，需要几十秒，请耐心等待…"
         self.lbl_hint.configure(text=hint)
         self.btn_search.configure(state="disabled", text="搜索中…")
@@ -312,11 +391,11 @@ class SearchPanel(ttk.Frame):
                 self._search_q.put(("cmt_partial", my_gen, db_label, rows))
             try:
                 results = self._query(sources, kw, start, end, limit, exclude,
-                                      cmt_cb=_on_shard)
+                                      cmt_cb=_on_shard, min_like=min_like)
             except Exception as exc:
                 logger.exception("搜索失败")
                 results = None
-            self._search_q.put((results, kw, limit, my_gen))
+            self._search_q.put((results, kw, limit, my_gen, min_like))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -338,7 +417,8 @@ class SearchPanel(ttk.Frame):
         if self._active_sec == "cmt":
             self._render_sec()
 
-    def _apply(self, results: dict | None, kw: str, limit: int, gen: int = 0) -> None:
+    def _apply(self, results: dict | None, kw: str, limit: int, gen: int = 0,
+               min_like: int = 0) -> None:
         # 旧搜索的终局结果直接丢弃
         if gen and gen != getattr(self, "_search_gen", 0):
             return
@@ -353,10 +433,12 @@ class SearchPanel(ttk.Frame):
             pass
         for sec in ("cmt", "dmk", "video"):
             data = results.get(sec) or {}
-            self._sec_rows[sec] = data.get("rows", [])
+            self._sec_rows[sec] = self._sorted(data.get("rows", []), sec)
         self._last_results = results
         self._last_kw = kw
+        self._last_min_like = min_like
         self._page = 0
+        self._push_history(kw)
 
         # 汇总与截断提示
         shown = {"cmt": len(self._sec_rows["cmt"]),
@@ -370,13 +452,25 @@ class SearchPanel(ttk.Frame):
                  if totals[k] is None or totals[k] > shown[k]]
         shown_txt = {k: (str(v) if v is not None else f"≥{shown[k]}")
                      for k, v in totals.items()}
-        from storage.dao import _parse_keywords
-        kw_display = " + ".join(_parse_keywords(kw)) if _parse_keywords(kw) else kw
+        from storage.dao import parse_smart_query, flatten_smart_query
+        _groups = parse_smart_query(kw)
+        _terms = flatten_smart_query(_groups)
+        kw_display = " / ".join(" + ".join(g) for g in _groups) if _groups else kw
+        _ = _terms
         msg = (f"词「{kw_display}」评论 {shown['cmt']}/{shown_txt['cmt']} · "
                f"弹幕 {shown['dmk']}/{shown_txt['dmk']} · "
                f"视频 {shown['video']}/{shown_txt['video']} 条")
+        if min_like and min_like > 0:
+            msg += f"（赞≥{min_like}）"
+        if self.var_sort.get() == "点赞倒序":
+            msg += "（按赞排序）"
         if trunc:
             msg += "　（分页预览，完整结果可用“导出命中CSV”取全部）"
+        failed = [f"{k}:{len((results.get(k) or {}).get('failed', []))}仓跳过"
+                  for k in ("cmt", "dmk", "video")
+                  if (results.get(k) or {}).get("failed")]
+        if failed:
+            msg += "　（" + "、".join(failed) + "，结果可能不全）"
         self.lbl_hint.configure(text=msg)
 
         # 侧边栏按钮显示命中数
@@ -390,12 +484,12 @@ class SearchPanel(ttk.Frame):
         self._render_sec()
 
     def _query(self, sources: dict, kw: str, start: str, end: str, limit: int,
-               exclude: str = "", cmt_cb=None) -> dict:
+               exclude: str = "", cmt_cb=None, min_like: int = 0) -> dict:
         out = {}
         if sources.get("cmt"):
             out["cmt"] = dao.search_comments(kw, start=start, end=end,
                                              exclude=exclude, limit=limit,
-                                             progress_cb=cmt_cb)
+                                             progress_cb=cmt_cb, min_like=min_like)
         if sources.get("dmk"):
             out["dmk"] = dao.search_danmaku(kw, start=start, end=end,
                                             exclude=exclude, limit=limit)
@@ -538,10 +632,10 @@ class SearchPanel(ttk.Frame):
 
     @staticmethod
     def _highlight(txt: "tk.Text", keyword: str) -> None:
-        """高亮所有关键词（逗号分隔），每个词单独高亮。"""
-        from storage.dao import _parse_keywords
+        """高亮所有关键词（智能语法拆词后逐词高亮，引号短语整体高亮）。"""
+        from storage.dao import parse_smart_query, flatten_smart_query
         txt.tag_configure("hit", background="#ffe28a", foreground="#a00")
-        for kw in _parse_keywords(keyword):
+        for kw in flatten_smart_query(parse_smart_query(keyword)):
             start = "1.0"
             while True:
                 pos = txt.search(kw, start, stopindex="end", nocase=True)
@@ -600,7 +694,6 @@ class SearchPanel(ttk.Frame):
         for d in danmaku:
             txt.insert("end", f"[弹幕] {fmt_dt(d.get('ctime'))} {float(d.get('progress', 0) or 0):.1f}s | {d.get('mid_hash', '') or d.get('uid', '')} | {str(d.get('content', ''))}\n")
         txt.configure(state="disabled")
-        _ = values
 
     def _show_plain(self, row: dict) -> None:
         win = tk.Toplevel(self)
@@ -650,6 +743,11 @@ class SearchPanel(ttk.Frame):
         start = self.var_start.get().strip()
         end = self.var_end.get().strip()
         exclude = self.var_exclude.get().strip()
+        try:
+            # 以最后一次搜索时的条件导出，保证与界面展示一致
+            min_like = max(0, int(getattr(self, "_last_min_like", 0) or 0))
+        except ValueError:
+            min_like = 0
         want = {"cmt": self.var_in_c.get(), "dmk": self.var_in_d.get(),
                 "video": False}  # 视频命中量小且 LIKE 可接受，暂不并入全量导出
 
@@ -668,7 +766,8 @@ class SearchPanel(ttk.Frame):
                                 "视频标题", "UP主"])
                     if want["cmt"]:
                         for r in dao.iter_search_comments(
-                                kw, start=start, end=end, exclude=exclude):
+                                kw, start=start, end=end, exclude=exclude,
+                                min_like=min_like):
                             n_cmt += 1
                             w.writerow(self._row_comment(r))
                             if n_cmt % 5000 == 0:
