@@ -1020,51 +1020,205 @@ def list_all_video_aids() -> list[int]:
         conn.close()
 
 
-def query_comments_by_uid(uid: int, limit: int = 0) -> list[dict]:
-    """按 UID 查该用户全部评论（附所属视频信息）。limit<=0 表示无限。"""
-    conn = _r()
+def _uid_same_dsn() -> bool:
+    """D 与 E 是否同库（单库模式）：是则只查一次，避免重复计数。"""
+    try:
+        from config import get_config
+        cfg = get_config()
+        w = getattr(cfg, "mysql_write", cfg.mysql)
+        r = getattr(cfg, "mysql_archive", cfg.mysql)
+        return w["host"] == r["host"] and w["port"] == r["port"] and w["database"] == r["database"]
+    except Exception:
+        return True
+
+
+def _query_comments_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -> list[dict]:
+    """单个物理库内按 UID 查评论（表名带库前缀，同库内 JOIN 视频表）。"""
+    import pymysql
+    from config import get_config
+    cfg = get_config()
+    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
+    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
+                           password=base["password"], database=db, charset=base["charset"],
+                           cursorclass=pymysql.cursors.DictCursor,
+                           connect_timeout=5, read_timeout=120)
     try:
         sql = (
             "SELECT c.rpid, c.video_aid, c.parent, c.uid, c.content, c.like_num, "
             "       c.ctime, c.ip_location, v.bvid, v.title, v.owner_name "
-            "FROM raw_comments c LEFT JOIN meta_video v ON v.aid = c.video_aid "
+            f"FROM `{db}`.raw_comments c LEFT JOIN `{db}`.meta_video v ON v.aid = c.video_aid "
             "WHERE c.uid = %s ORDER BY c.ctime DESC"
-            + (" LIMIT %s" if limit and limit > 0 else "")
+            + (" LIMIT %s" if per_db_limit and per_db_limit > 0 else "")
         )
         with conn.cursor() as cur:
-            cur.execute(sql, (uid,) if not (limit and limit > 0) else (uid, limit))
+            cur.execute(sql, (uid,) if not (per_db_limit and per_db_limit > 0) else (uid, per_db_limit))
             return list(cur.fetchall())
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
-def query_danmaku_by_uid(uid: int, limit: int = 0) -> list[dict]:
-    """按 UID 查该用户全部弹幕（附视频信息）。limit<=0 表示无限。"""
-    conn = _r()
+def _query_danmaku_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -> list[dict]:
+    """单个物理库内按 UID 查弹幕（表名带库前缀，同库内 JOIN 视频表）。"""
+    import pymysql
+    from config import get_config
+    cfg = get_config()
+    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
+    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
+                           password=base["password"], database=db, charset=base["charset"],
+                           cursorclass=pymysql.cursors.DictCursor,
+                           connect_timeout=5, read_timeout=120)
     try:
         sql = (
             "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
             "       d.ctime, v.bvid, v.title, v.owner_name "
-            "FROM raw_danmaku d LEFT JOIN meta_video v ON v.aid = d.video_aid "
+            f"FROM `{db}`.raw_danmaku d LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
             "WHERE d.uid = %s ORDER BY d.ctime DESC"
-            + (" LIMIT %s" if limit and limit > 0 else "")
+            + (" LIMIT %s" if per_db_limit and per_db_limit > 0 else "")
         )
         with conn.cursor() as cur:
-            cur.execute(sql, (uid,) if not (limit and limit > 0) else (uid, limit))
+            cur.execute(sql, (uid,) if not (per_db_limit and per_db_limit > 0) else (uid, per_db_limit))
             return list(cur.fetchall())
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _query_user_one_db(db: str, role: str, uid: int) -> dict | None:
+    """单个物理库内按 UID 查用户维度信息。"""
+    import pymysql
+    from config import get_config
+    cfg = get_config()
+    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
+    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
+                           password=base["password"], database=db, charset=base["charset"],
+                           cursorclass=pymysql.cursors.DictCursor,
+                           connect_timeout=5, read_timeout=30)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT uid, uname, level, sex, is_vip, signature, update_time FROM `{db}`.dim_user WHERE uid = %s", (uid,))
+            return cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def query_comments_by_uid(uid: int, limit: int = 0) -> list[dict]:
+    """按 UID 查该用户全部评论（附所属视频信息）。limit<=0 表示无限。
+
+    跨库合并：D 缓冲（最新未归档）+ E 主库及各小仓库，Python 按 ctime 倒序归并，
+    按 rpid 去重（归档中/同库模式的重复行只留一条）。
+    """
+    per_db_limit = int(limit) if limit and limit > 0 else 0
+    targets: list[tuple[str, str]] = []
+    try:
+        from config import get_config
+        cfg = get_config()
+        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
+        # D 缓冲优先（最新数据）
+        targets.append((d_db, "write"))
+        for db in (_shard_dbs() or ["bilibili_data"]):
+            if _uid_same_dsn() and db == d_db:
+                continue  # 单库模式：D 与 E 主库是同一物理库，去重
+            targets.append((db, "read"))
+    except Exception:
+        targets = [("bilibili_data", "read")]
+    all_rows: list[dict] = []
+    for db, role in targets:
+        try:
+            all_rows.extend(_query_comments_uid_one_db(db, role, uid, per_db_limit))
+        except Exception as exc:
+            logger.warning("UID评论查询 %s(%s) 跳过: %s", db, role, exc)
+    if not all_rows and targets:
+        # 全失败时回退旧单库语义（抛原始异常而非静默空结果，由调用方提示）
+        pass
+    seen: set = set()
+    uniq: list[dict] = []
+    for r in all_rows:
+        k = r.get("rpid")
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(r)
+    uniq.sort(key=lambda r: r.get("ctime") or "", reverse=True)
+    if per_db_limit > 0:
+        return uniq[:per_db_limit]
+    return uniq
+
+
+def query_danmaku_by_uid(uid: int, limit: int = 0) -> list[dict]:
+    """按 UID 查该用户全部弹幕（附视频信息）。limit<=0 表示无限。
+
+    跨库合并：D 缓冲 + E 主库及各小仓库，按 ctime 倒序归并，按 id 去重。
+    """
+    per_db_limit = int(limit) if limit and limit > 0 else 0
+    targets: list[tuple[str, str]] = []
+    try:
+        from config import get_config
+        cfg = get_config()
+        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
+        targets.append((d_db, "write"))
+        for db in (_shard_dbs() or ["bilibili_data"]):
+            if _uid_same_dsn() and db == d_db:
+                continue
+            targets.append((db, "read"))
+    except Exception:
+        targets = [("bilibili_data", "read")]
+    all_rows: list[dict] = []
+    for db, role in targets:
+        try:
+            all_rows.extend(_query_danmaku_uid_one_db(db, role, uid, per_db_limit))
+        except Exception as exc:
+            logger.warning("UID弹幕查询 %s(%s) 跳过: %s", db, role, exc)
+    seen: set = set()
+    uniq: list[dict] = []
+    for r in all_rows:
+        k = r.get("id")
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(r)
+    uniq.sort(key=lambda r: r.get("ctime") or "", reverse=True)
+    if per_db_limit > 0:
+        return uniq[:per_db_limit]
+    return uniq
 
 
 def query_user(uid: int) -> dict | None:
-    """按 UID 查用户维度信息。"""
-    conn = _r()
+    """按 UID 查用户维度信息（跨库：D + E 各仓，取最新一条）。"""
+    cands: list[dict] = []
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT uid, uname, level, sex, is_vip, signature FROM dim_user WHERE uid = %s", (uid,))
-            return cur.fetchone()
-    finally:
-        conn.close()
+        from config import get_config
+        cfg = get_config()
+        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
+        targets: list[tuple[str, str]] = [(d_db, "write")]
+        for db in (_shard_dbs() or ["bilibili_data"]):
+            if _uid_same_dsn() and db == d_db:
+                continue
+            targets.append((db, "read"))
+    except Exception:
+        targets = [("bilibili_data", "read")]
+    for db, role in targets:
+        try:
+            row = _query_user_one_db(db, role, uid)
+            if row:
+                cands.append(row)
+        except Exception:
+            continue
+    if not cands:
+        return None
+    # 取最新更新的一条（update_time 倒序；缺失则取昵称非空者）
+    def _key(r: dict):
+        return (str(r.get("update_time") or ""), str(r.get("uname") or "") != "")
+    best = sorted(cands, key=_key, reverse=True)[0]
+    best.pop("update_time", None)
+    return best
 
 
 def query_recent_videos(limit: int | None = None) -> list[dict]:
