@@ -1,3 +1,4 @@
 requests>=2.31
 pymysql>=1.1.0
 APScheduler>=3.10
+matplotlib>=3.8  # 统计V2趋势图（缺失时面板降级为文字+表格，不报错）

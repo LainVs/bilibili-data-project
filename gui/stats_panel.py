@@ -10,11 +10,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
 from gui.util import fmt_dt
 from gui.widgets import SmartTable
@@ -114,6 +115,9 @@ class StatsPanel(ttk.Frame):
                     self._apply_rank_partial(payload)
                 elif isinstance(payload, tuple) and payload and payload[0] == "stat_partial":
                     self._apply_stat_partial(*payload[1:])
+                elif isinstance(payload, tuple) and payload and payload[0] == "insight":
+                    _, ins, charts, summary = (payload + (None, {}, ""))[:4]
+                    self._apply_insights(ins, charts or {}, summary or "")
                 else:
                     self._apply(payload)
         except queue.Empty:
@@ -250,9 +254,241 @@ class StatsPanel(ttk.Frame):
             sb.grid(row=1, column=1, sticky="ns")
             self._rank_trees[key] = tree
             self._rank_cnts[key] = cnt
+        self._build_insight_tab(nb)
         self._nb = nb
         self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消…", background="#fffbe6", foreground="#b36",
                                   font=("Microsoft YaHei UI", 11, "bold"), anchor="center")
+
+    # ---------------- 趋势洞察（统计 V2 新增页） ----------------
+    def _build_insight_tab(self, nb: ttk.Notebook) -> None:
+        """第 6 个页签：关键词抽样 → 内存聚合 → 高频词/情感/时段/趋势图。"""
+        tab = ttk.Frame(nb, padding=(6, 4))
+        nb.add(tab, text="趋势洞察")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(3, weight=1)
+        self._insight_imgs: list = []  # 持有 PhotoImage 引用防 GC
+        self._insight_data: dict = {}
+        self._insight_charts: dict = {}
+
+        ctl = ttk.Frame(tab)
+        ctl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(ctl, text="关键词抽样:").pack(side="left")
+        self.var_insight_kw = tk.StringVar()
+        ttk.Entry(ctl, textvariable=self.var_insight_kw, width=22).pack(side="left", padx=2)
+        ttk.Label(ctl, text="近N天:").pack(side="left", padx=(8, 0))
+        self.var_insight_days = tk.StringVar(value="30")
+        ttk.Spinbox(ctl, from_=7, to=365, textvariable=self.var_insight_days,
+                    width=5).pack(side="left")
+        ttk.Label(ctl, text="图表:").pack(side="left", padx=(8, 0))
+        self.var_insight_chart = tk.StringVar(value="每日趋势")
+        _cb = ttk.Combobox(ctl, textvariable=self.var_insight_chart, width=10,
+                           values=["每日趋势", "24小时分布", "高频词"],
+                           state="readonly")
+        _cb.pack(side="left", padx=2)
+        _cb.bind("<<ComboboxSelected>>", self._show_insight_chart)
+        self.btn_insight = ttk.Button(ctl, text="生成洞察",
+                                      command=self.refresh_insights)
+        self.btn_insight.pack(side="left", padx=8)
+        ttk.Button(ctl, text="导出CSV",
+                   command=self.export_insights_csv).pack(side="left")
+        ttk.Button(ctl, text="打开图表目录",
+                   command=self.open_charts_dir).pack(side="left", padx=4)
+        self.lbl_insight_status = ttk.Label(ctl, text="", foreground="#888")
+        self.lbl_insight_status.pack(side="left", padx=8)
+
+        self.lbl_insight_summary = ttk.Label(tab, text="输入关键词限定范围（留空=最新采样），点「生成洞察」。",
+                                             foreground="#555", wraplength=860,
+                                             justify="left")
+        self.lbl_insight_summary.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+
+        body = ttk.Frame(tab)
+        body.grid(row=3, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=0)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        ttk.Label(left, text="高频词 Top20", foreground="#888").pack(anchor="w")
+        self.insight_terms = SmartTable(left, show="headings")
+        self.insight_terms.set_columns([("term", "词", 22), ("cnt", "次数", 10)])
+        self.insight_terms.pack(fill="both", expand=True)
+        right = ttk.Frame(body)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+        ttk.Label(right, text="图表", foreground="#888").grid(row=0, column=0, sticky="w")
+        self.lbl_insight_img = ttk.Label(right, text="（生成洞察后显示图表）",
+                                         anchor="center", background="#fafafa")
+        self.lbl_insight_img.grid(row=1, column=0, sticky="nsew")
+        # 缓存秒显：启动时若有上次 insights，直接显示文字部分
+        self.after(600, self._show_cached_insights)
+
+    def _show_cached_insights(self) -> None:
+        try:
+            from analysis import stats_service as _svc
+            ins, when = _svc.load_cached_insights()
+            if ins:
+                self._apply_insights(ins, {}, f"上次洞察: {when}（点生成洞察刷新）")
+        except Exception:
+            pass
+
+    def refresh_insights(self) -> None:
+        """后台生成洞察（抽样→聚合→画图→缓存），主线程不阻塞。"""
+        if getattr(self, "_insight_thread", None) and self._insight_thread.is_alive():
+            return
+        try:
+            days = max(7, min(365, int(self.var_insight_days.get() or 30)))
+        except ValueError:
+            days = 30
+        kw = self.var_insight_kw.get().strip()
+        self.btn_insight.configure(state="disabled", text="生成中…")
+        self.lbl_insight_status.configure(text="抽样聚合中…")
+
+        def _worker() -> None:
+            try:
+                from analysis import stats_service as _svc
+                from visualization import charts as _charts
+                rows = _svc.sample_texts_for_insight(limit=5000, keyword=kw)
+                ins = _svc.compute_insights(rows, top=20, days=days)
+                # 全库趋势覆盖抽样（更准；失败则保留抽样值）
+                try:
+                    full_daily = _svc.get_daily_comments(days=days)
+                    if full_daily and sum(d.get("cnt", 0) for d in full_daily) > 0:
+                        ins["daily"] = full_daily
+                except Exception:
+                    pass
+                try:
+                    full_hours = _svc.get_hourly_comments()
+                    if full_hours and sum(h.get("cnt", 0) for h in full_hours) > 0:
+                        ins["hours"] = full_hours
+                except Exception:
+                    pass
+                out_dir = os.path.join("logs", "stats_charts")
+                charts = _charts.render_all(ins, out_dir)
+                try:
+                    _svc.save_cached_insights(ins)
+                except Exception:
+                    pass
+                summary = _svc.insights_summary(ins)
+                self._stats_q.put(("insight", ins, charts, summary))
+            except Exception as exc:
+                logger.warning("洞察生成失败: %s", exc)
+                self._stats_q.put(("insight", None, {}, f"洞察生成失败：{exc}"))
+
+        self._insight_thread = threading.Thread(target=_worker, daemon=True)
+        self._insight_thread.start()
+
+    def _apply_insights(self, ins: dict | None, charts: dict,
+                        summary: str) -> None:
+        try:
+            self.btn_insight.configure(state="normal", text="生成洞察")
+        except tk.TclError:
+            return
+        if not isinstance(ins, dict) or not ins.get("total"):
+            self.lbl_insight_status.configure(text="")
+            self.lbl_insight_summary.configure(text=summary or "暂无数据")
+            return
+        self._insight_data = ins
+        self._insight_charts = charts or {}
+        self.lbl_insight_status.configure(text=f"样本 {ins.get('total', 0)} 条")
+        try:
+            self.lbl_insight_summary.configure(text=summary)
+        except tk.TclError:
+            pass
+        # 高频词表
+        try:
+            for iid in self.insight_terms.get_children():
+                self.insight_terms.delete(iid)
+            for t in (ins.get("terms") or [])[:20]:
+                self.insight_terms.insert("", "end",
+                                          values=(t.get("term"), t.get("cnt", 0)))
+        except tk.TclError:
+            pass
+        self._show_insight_chart()
+
+    def _show_insight_chart(self, *_args) -> None:
+        """按下拉选择显示一张图（PhotoImage 展示 PNG 文件）。"""
+        key_map = {"每日趋势": "daily", "24小时分布": "hours", "高频词": "terms"}
+        key = key_map.get(self.var_insight_chart.get(), "daily")
+        path = (self._insight_charts or {}).get(key)
+        if not path or not os.path.exists(path):
+            # 无 matplotlib 或无数据时给文字降级
+            extra = ""
+            try:
+                from visualization import charts as _c
+                if not _c.available():
+                    extra = "（未安装 matplotlib：pip install matplotlib 后重生成）"
+            except Exception:
+                pass
+            self.lbl_insight_img.configure(text=f"暂无图表{extra}", image="")
+            return
+        try:
+            img = tk.PhotoImage(file=path)
+            # 过宽时等比缩小到页签宽度内
+            try:
+                w = max(1, self.lbl_insight_img.winfo_width() or 800)
+                if img.width() > w and w > 100:
+                    step = max(1, img.width() // w)
+                    if step > 1:
+                        img = img.subsample(step, step)
+            except Exception:
+                pass
+            self._insight_imgs.append(img)
+            self.lbl_insight_img.configure(text="", image=img)
+        except tk.TclError as exc:
+            self.lbl_insight_img.configure(text=f"图表显示失败：{exc}", image="")
+
+    def export_insights_csv(self) -> None:
+        if not self._insight_data:
+            messagebox.showinfo("导出", "暂无洞察数据，先点「生成洞察」。")
+            return
+        path = filedialog.asksaveasfilename(title="导出洞察CSV",
+                                            defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")],
+                                            initialfile="insights.csv")
+        if not path:
+            return
+        try:
+            from analysis import stats_service as _svc
+            _svc.export_insights_csv(self._insight_data, path)
+            messagebox.showinfo("导出", f"已导出：{path}")
+        except Exception as exc:
+            messagebox.showerror("导出", f"导出失败：{exc}")
+
+    def open_charts_dir(self) -> None:
+        d = os.path.abspath(os.path.join("logs", "stats_charts"))
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.startfile(d)  # type: ignore[attr-defined]
+        except Exception:
+            messagebox.showinfo("图表目录", d)
+
+    def snapshot_state(self) -> dict:
+        """会话快照：统计筛选 + 洞察输入（供重启恢复）。"""
+        try:
+            return {"start": self.var_start.get(), "end": self.var_end.get(),
+                    "top": self.var_top.get(), "minlen": self.var_minlen.get(),
+                    "kw": self.var_insight_kw.get(),
+                    "days": self.var_insight_days.get(),
+                    "chart": self.var_insight_chart.get()}
+        except Exception:
+            return {}
+
+    def restore_state(self, d: dict) -> None:
+        try:
+            if not isinstance(d, dict):
+                return
+            for var, key in ((getattr(self, "var_start", None), "start"),
+                             (getattr(self, "var_end", None), "end"),
+                             (getattr(self, "var_top", None), "top"),
+                             (getattr(self, "var_minlen", None), "minlen"),
+                             (getattr(self, "var_insight_kw", None), "kw"),
+                             (getattr(self, "var_insight_days", None), "days"),
+                             (getattr(self, "var_insight_chart", None), "chart")):
+                if var is not None and d.get(key) is not None:
+                    var.set(str(d.get(key)))
+        except Exception:
+            pass
 
     def refresh(self, mode: str = "full") -> None:
         """后台线程执行统计（与排行榜）查询，完成后回填，主线程不阻塞。

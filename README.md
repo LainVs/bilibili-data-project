@@ -39,6 +39,18 @@ python main.py serve
 - `python main.py increment` 手动增量
 - `python main.py version`
 
+## 统计 V2（总览 + 排行榜 + 趋势洞察）
+
+- GUI「统」面板新增「趋势洞察」页：关键词抽样 → 高频词 Top20 / 情感分布 /
+  每日趋势 / 24小时分布 / 长度·点赞·IP分布，图表存 `logs/stats_charts/`，
+  可导出 CSV。
+- 服务层 `analysis/stats_service.py`（GUI/CLI 共用）+ 纯函数
+  `analysis/text.py`（jieba 可选，缺失回退 2-gram）+ 图表
+  `visualization/charts.py`（matplotlib 可选，缺失降级文字）。
+- CLI：`python main.py stats --overview` 只打总览；
+  `python main.py stats --keyword 烂片 --days 30 --export out.csv --charts logs/stats_charts`
+- 单测（无DB）：`python -m pytest tests/test_stats_service.py -q`
+
 ## 目录结构
 
 ```

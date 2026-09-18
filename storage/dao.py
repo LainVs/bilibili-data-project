@@ -2949,3 +2949,112 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
     if cancelled and (stop_event is not None and stop_event.is_set()):
         raise StatsCancelled()
     return out
+
+
+# ---------------- 趋势轻量查询（统计 V2：失败只降级为空，不抛异常） ----------------
+
+def get_daily_comment_counts(days: int = 30) -> list[dict]:
+    """近 N 天每日评论量（跨 D+E 各仓求和，失败的仓跳过）。
+
+    返回 [{"day": "YYYY-MM-DD", "cnt": n}]（缺失日期补 0，保证定长）。
+    统计 V2 趋势图用；任何异常只记日志并返回已有数据，不抛。
+    """
+    import datetime as _dt
+
+    days = max(1, min(365, int(days or 30)))
+    today = _dt.date.today()
+    base = {str(today - _dt.timedelta(days=i)): 0 for i in range(days - 1, -1, -1)}
+    start = str(today - _dt.timedelta(days=days - 1))
+    targets: list[tuple[str, str]] = []
+    try:
+        from config import get_config
+        cfg = get_config()
+        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
+        targets.append((d_db, "write"))
+        for db in (_shard_dbs() or ["bilibili_data"]):
+            if _uid_same_dsn() and db == d_db:
+                continue
+            targets.append((db, "read"))
+    except Exception:
+        targets = [("bilibili_data", "read")]
+    for db, role in targets:
+        try:
+            import pymysql
+            from config import get_config
+            cfg = get_config()
+            base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",
+                               cfg.mysql)
+            conn = pymysql.connect(host=base_cfg["host"], port=base_cfg["port"],
+                                   user=base_cfg["user"], password=base_cfg["password"],
+                                   database=db, charset=base_cfg["charset"],
+                                   cursorclass=pymysql.cursors.DictCursor,
+                                   connect_timeout=5, read_timeout=60)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT DATE(ctime) AS d, COUNT(*) AS n FROM `{db}`.raw_comments "
+                        "WHERE ctime >= %s GROUP BY DATE(ctime)", (start,))
+                    for r in cur.fetchall():
+                        k = str(r.get("d") or "")
+                        if k in base:
+                            base[k] += int(r.get("n") or 0)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("每日评论量 %s(%s) 跳过: %s", db, role, exc)
+    return [{"day": k, "cnt": base[k]} for k in sorted(base)]
+
+
+def get_hourly_comment_counts() -> list[dict]:
+    """24 小时评论分布（跨 D+E 各仓求和，失败的仓跳过）。
+
+    返回 [{"hour": 0..23, "cnt": n}]，统计 V2 时段分布图用。
+    """
+    cnt = [0] * 24
+    targets: list[tuple[str, str]] = []
+    try:
+        from config import get_config
+        cfg = get_config()
+        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
+        targets.append((d_db, "write"))
+        for db in (_shard_dbs() or ["bilibili_data"]):
+            if _uid_same_dsn() and db == d_db:
+                continue
+            targets.append((db, "read"))
+    except Exception:
+        targets = [("bilibili_data", "read")]
+    for db, role in targets:
+        try:
+            import pymysql
+            from config import get_config
+            cfg = get_config()
+            base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",
+                               cfg.mysql)
+            conn = pymysql.connect(host=base_cfg["host"], port=base_cfg["port"],
+                                   user=base_cfg["user"], password=base_cfg["password"],
+                                   database=db, charset=base_cfg["charset"],
+                                   cursorclass=pymysql.cursors.DictCursor,
+                                   connect_timeout=5, read_timeout=60)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT HOUR(ctime) AS h, COUNT(*) AS n FROM `{db}`.raw_comments "
+                        "GROUP BY HOUR(ctime)")
+                    for r in cur.fetchall():
+                        try:
+                            h = int(r.get("h"))
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= h < 24:
+                            cnt[h] += int(r.get("n") or 0)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("小时分布 %s(%s) 跳过: %s", db, role, exc)
+    return [{"hour": h, "cnt": cnt[h]} for h in range(24)]

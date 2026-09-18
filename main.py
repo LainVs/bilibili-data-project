@@ -58,6 +58,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_post.add_argument("--incremental", action="store_true", help="增量：只采新评论")
 
     sub.add_parser("gui", help="启动图形界面（定向采集/UP主/帖子/增量轮询/用户查询）")
+
+    p_stats = sub.add_parser("stats", help="统计：总览/趋势洞察/导出CSV")
+    p_stats.add_argument("--overview", action="store_true", help="只打总览10项")
+    p_stats.add_argument("--keyword", default="", help="洞察抽样关键词（留空=最新采样）")
+    p_stats.add_argument("--days", type=int, default=30, help="趋势近N天（默认30）")
+    p_stats.add_argument("--top", type=int, default=20, help="高频词TopN（默认20）")
+    p_stats.add_argument("--limit", type=int, default=5000, help="洞察抽样上限（默认5000）")
+    p_stats.add_argument("--export", default="", help="导出CSV路径（总览+洞察三段）")
+    p_stats.add_argument("--charts", default="", help="渲染趋势图到指定目录")
     return parser.parse_args(argv)
 
 
@@ -87,6 +96,36 @@ def main(argv: list[str] | None = None) -> int:
         from gui.main_window import run as run_gui
 
         run_gui()
+        return 0
+
+    if args.command == "stats":
+        from analysis import stats_service as _svc
+
+        if args.overview and not args.keyword and not args.export and not args.charts:
+            stats = _svc.get_overview()
+            print(_svc.describe_overview(stats))
+            for name, val in _svc.overview_export_rows(stats):
+                print(f"{name}: {val:,}")
+            return 0
+        stats = _svc.get_overview()
+        print("【总览】" + _svc.describe_overview(stats))
+        rows = _svc.sample_texts_for_insight(limit=args.limit, keyword=args.keyword)
+        ins = _svc.compute_insights(rows, top=args.top, days=args.days)
+        print("【洞察】" + _svc.insights_summary(ins))
+        for t in (ins.get("terms") or [])[: args.top]:
+            print(f"  {t['term']}: {t['cnt']}")
+        if args.export:
+            _svc.export_overview_csv(stats, args.export.replace(".csv", "_overview.csv")
+                                     if "_overview" not in args.export and "_insight" not in args.export
+                                     else args.export)
+            _svc.export_insights_csv(ins, args.export.replace(".csv", "_insights.csv")
+                                     if "_overview" not in args.export and "_insight" not in args.export
+                                     else args.export)
+            print(f"已导出：{args.export}")
+        if args.charts:
+            from visualization import charts as _charts
+            paths = _charts.render_all(ins, args.charts)
+            print("图表：" + str(paths))
         return 0
 
     if args.command == "up":
