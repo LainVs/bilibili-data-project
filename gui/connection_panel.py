@@ -86,7 +86,9 @@ class ConnectionPanel(ttk.Frame):
         btns.grid(row=3, column=0, sticky="ew", padx=8, pady=8)
         ttk.Button(btns, text="检测/重连", command=self.refresh).pack(side="left")
         ttk.Button(btns, text="管理员重连D", command=self._admin_start_d).pack(side="left", padx=6)
+        ttk.Button(btns, text="断开D", command=self._admin_stop_d).pack(side="left", padx=6)
         ttk.Button(btns, text="管理员重连E", command=self._admin_start_e).pack(side="left", padx=6)
+        ttk.Button(btns, text="断开E", command=self._admin_stop_e).pack(side="left", padx=6)
         self.btn_archive = ttk.Button(btns, text="手动归档 D→E", command=self._manual_archive)
         self.btn_archive.pack(side="left", padx=6)
         self._archive_thread: threading.Thread | None = None
@@ -94,7 +96,7 @@ class ConnectionPanel(ttk.Frame):
         self.btn_archive_cancel.pack(side="left", padx=6)
         ttk.Button(btns, text="清理卡死", command=self._kill_stuck).pack(side="left", padx=6)
         ttk.Button(btns, text="打开数据库设置", command=self._open_db).pack(side="left", padx=6)
-        self.lbl_tip = ttk.Label(btns, text="检测仅查看状态，重连请点管理员重连", foreground="#888")
+        self.lbl_tip = ttk.Label(btns, text="检测仅查看状态，重连/断开请点对应按钮（断开需管理员提权）", foreground="#888")
         self.lbl_tip.pack(side="left", padx=8)
         self._archive_stop = threading.Event()
 
@@ -137,6 +139,11 @@ class ConnectionPanel(ttk.Frame):
     def _admin_start_d(self):
         import ctypes
         try:
+            from storage.db import clear_manual_offline
+            clear_manual_offline("write")  # 用户点了重连：允许守护线程恢复自启
+        except Exception:
+            pass
+        try:
             ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", "-NoProfile -Command \"net start MySQL80; Start-Sleep 2\"", None, 0)
             if ret <= 32:
                 from tkinter import messagebox
@@ -146,8 +153,74 @@ class ConnectionPanel(ttk.Frame):
             messagebox.showerror("错误", str(exc))
         self.after(4000, self.refresh)
 
+    def _admin_stop_d(self):
+        """断开 D：提权 net stop MySQL80，并挂手动标记防守护线程拉起。"""
+        from tkinter import messagebox
+        if not messagebox.askokcancel("断开D",
+                                      "将停止 MySQL80（缓冲库D，3306）。\n\n"
+                                      "· 采集/归档/写入将失败；\n"
+                                      "· 守护线程不会自动拉起，直到你点「管理员重连D」。\n\n"
+                                      "确定断开吗？"):
+            return
+        import ctypes
+        try:
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", "-NoProfile -Command \"net stop MySQL80\"", None, 0)
+            if ret <= 32:
+                messagebox.showwarning("提示", f"提权失败({ret})")
+                return
+            try:
+                from storage.db import set_manual_offline
+                set_manual_offline("write")
+            except Exception:
+                pass
+            try:
+                from storage.dao import _rclose_all
+                _rclose_all()  # 丢掉本线程复用池里的旧连接，下次快速失败而非挂死
+            except Exception:
+                pass
+            self.lbl_tip.configure(text="已请求断开D，5秒后自动检测...")
+        except Exception as exc:
+            messagebox.showerror("错误", str(exc))
+        self.after(5000, self.refresh)
+
+    def _admin_stop_e(self):
+        """断开 E：提权 net stop MySQL80-E（拔移动硬盘前先点此）。"""
+        from tkinter import messagebox
+        if not messagebox.askokcancel("断开E",
+                                      "将停止 MySQL80-E（归档库E，3307）。\n\n"
+                                      "· 查询自动回退到D；\n"
+                                      "· 拔移动硬盘/关机前请先断开E；\n"
+                                      "· 重连请点「管理员重连E」。\n\n"
+                                      "确定断开吗？"):
+            return
+        import ctypes
+        try:
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "powershell.exe", "-NoProfile -Command \"net stop MySQL80-E\"", None, 0)
+            if ret <= 32:
+                messagebox.showwarning("提示", f"提权失败({ret})")
+                return
+            try:
+                from storage.db import set_manual_offline
+                set_manual_offline("read")
+            except Exception:
+                pass
+            try:
+                from storage.dao import _rclose_all
+                _rclose_all()
+            except Exception:
+                pass
+            self.lbl_tip.configure(text="已请求断开E，5秒后自动检测...")
+        except Exception as exc:
+            messagebox.showerror("错误", str(exc))
+        self.after(5000, self.refresh)
+
     def _admin_start_e(self):
         import ctypes, subprocess, tempfile, os
+        try:
+            from storage.db import clear_manual_offline
+            clear_manual_offline("read")  # 用户点了重连：清除手动断开标记
+        except Exception:
+            pass
         # 若已 Running 直接检测
         try:
             r = subprocess.run(["sc","query","MySQL80-E"], capture_output=True, text=True, timeout=3, creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
@@ -377,4 +450,13 @@ Get-Service MySQL80-E | Out-Host
             self.lbl_e_svc.configure(text=svc_e, foreground="#080" if svc_e=="Running" else "#a00")
             self.lbl_e_conn.configure(text="✓ "+msg_e if ok_e else "✗ "+msg_e, foreground="#080" if ok_e else "#a00")
             self.lbl_tip.configure(text="检测完成" if (ok_d and ok_e) else "部分未连通，E离线时查询回退到D")
+            # 连接恢复即清除手动断开标记（服务可能被外部拉起，标记过期）
+            try:
+                from storage.db import clear_manual_offline
+                if ok_d:
+                    clear_manual_offline("write")
+                if ok_e:
+                    clear_manual_offline("read")
+            except Exception:
+                pass
         self.after(0, upd)

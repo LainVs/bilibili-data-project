@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pymysql
@@ -85,7 +86,40 @@ def ensure_conn(conn: pymysql.connections.Connection | None, role: str = "write"
 # 同一进程只执行一次，避免每次统计/查询重复建连查 information_schema。
 # 失败不标记（E 离线时下次重试），成功才标记。
 _ensured: set[str] = set()
-_ensured_lock = __import__("threading").Lock()
+_ensured_lock = threading.Lock()
+
+
+# 手动断开标记：用户在“连”面板点“断开D/E”后置位，守护线程不再自动
+# `net start` 拉起，直到用户点重连（或检测到连接恢复）才清除。
+# key 归一化为 "write"(D)/"read"(E)，与 _cfg_for 的 role 语义一致。
+_manual_offline: set[str] = set()
+_manual_offline_lock = threading.Lock()
+
+
+def _offline_key(role: str) -> str:
+    if role in ("read", "archive", "query"):
+        return "read"
+    if role in ("write", "buffer", "d"):
+        return "write"
+    return "write"
+
+
+def set_manual_offline(role: str = "write") -> None:
+    """标记某库为用户手动断开（守护线程跳过自启）。"""
+    with _manual_offline_lock:
+        _manual_offline.add(_offline_key(role))
+
+
+def clear_manual_offline(role: str = "write") -> None:
+    """清除手动断开标记（重连/恢复后调用）。"""
+    with _manual_offline_lock:
+        _manual_offline.discard(_offline_key(role))
+
+
+def is_manual_offline(role: str = "write") -> bool:
+    """某库是否处于用户手动断开状态。"""
+    with _manual_offline_lock:
+        return _offline_key(role) in _manual_offline
 
 
 def _once_claim(key: str) -> bool:

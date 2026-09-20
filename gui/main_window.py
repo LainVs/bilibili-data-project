@@ -485,6 +485,16 @@ class MainWindow(tk.Tk):
             consecutive_failures += 1
             logger.warning("MySQL守护: 连接失败 (连续%d次)", consecutive_failures)
 
+            # 用户手动断开D：跳过自启（只记一次，避免每30秒刷屏），等用户点重连
+            try:
+                from storage.db import is_manual_offline
+                if is_manual_offline("write"):
+                    if consecutive_failures == 1:
+                        logger.info("MySQL守护: D为手动断开，跳过自动拉起")
+                    continue
+            except Exception:
+                pass
+
             # 检测磁盘
             drive = _get_datadir_drive()
             disk_ok = _disk_ok(drive)
