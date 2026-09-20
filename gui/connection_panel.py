@@ -304,18 +304,43 @@ Get-Service MySQL80-E | Out-Host
         self.lbl_prog.configure(text="预估计算中…")
         def worker():
             import re
-            # 后台取预估行数（不卡 UI）
+            # 预检：D 各表行数 + 建库门槛，一次说清楚。
+            # （以前 0 行/查询失败都显示“预估 1 行”，看不出原因，像卡死。）
+            try:
+                from storage.archive_sync import _MIN_ROWS_FOR_NEW_SHARD as _TH
+            except Exception:
+                _TH = 2000000
+            counts: dict = {}
+            count_err = ""
             try:
                 from storage.db import get_conn as _gc2
                 _c2 = _gc2("write")
-                with _c2.cursor() as _cur:
-                    _cur.execute("SELECT COUNT(*) AS n FROM raw_comments")
-                    _total_est = int(_cur.fetchone()["n"] or 1)
-                _c2.close()
-            except Exception:
-                _total_est = 1
+                try:
+                    with _c2.cursor() as _cur:
+                        for _t in ("raw_comments", "raw_danmaku", "meta_video", "dim_user"):
+                            _cur.execute(f"SELECT COUNT(*) AS n FROM {_t}")
+                            _row = _cur.fetchone()
+                            counts[_t] = int((_row or {}).get("n") or 0)
+                finally:
+                    try:
+                        _c2.close()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                count_err = (str(exc).splitlines()[0][:200] if str(exc) else repr(exc))
+            _total_est = counts.get("raw_comments", 0)
             self.after(0, lambda v=_total_est: self.prog.configure(maximum=max(1, v), value=0))
-            self.after(0, lambda v=_total_est: self.lbl_prog.configure(text=f"预估 {v} 行 0%"))
+            if count_err:
+                self.after(0, lambda e=count_err: self._append_log(f"预检：D行数查询失败：{e}（请先检查D连接/服务）"))
+                self.after(0, lambda: self.lbl_prog.configure(text="预估未知（D查询失败）"))
+            else:
+                self.after(0, lambda v=_total_est: self.lbl_prog.configure(text=f"预估 {v} 行 0%"))
+                self.after(0, lambda c=dict(counts): self._append_log(
+                    f"预检 D：评论{c.get('raw_comments', 0)} / 弹幕{c.get('raw_danmaku', 0)} / "
+                    f"视频{c.get('meta_video', 0)} / 用户{c.get('dim_user', 0)}"))
+                if _total_est < _TH:
+                    self.after(0, lambda v=_total_est, t=_TH: self._append_log(
+                        f"预检：D评论{v}行 < 建库门槛{t}行，本次很可能被拒绝（继续采集攒数据；有未完成仓则续拷不受限）"))
             total_est = _total_est
             def on_prog(msg: str):
                 self.after(0, lambda: self.lbl_tip.configure(text=msg))

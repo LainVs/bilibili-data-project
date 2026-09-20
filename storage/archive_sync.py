@@ -17,6 +17,11 @@ def _same_dsn() -> bool:
     r = getattr(cfg, "mysql_archive", cfg.mysql)
     return w["host"] == r["host"] and w["port"] == r["port"] and w["database"] == r["database"]
 
+# 建新小仓库的容量门槛：D 的评论行数攒够才值得建仓
+# （拷文件+验对+清D一整套很重，小数据先攒着）。
+# 已有未完成 shard 时走续拷，不受此限。
+_MIN_ROWS_FOR_NEW_SHARD = 2000000
+
 _SHARD_PREFIX = "bilibili_"
 _TABLES = [
     ("meta_video", "aid", ["aid","bvid","cid","title","owner_uid","owner_name","pubdate","part","create_time"]),
@@ -102,8 +107,8 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                 cur.execute("SELECT COUNT(*) AS n FROM raw_comments")
                 r = cur.fetchone(); tot2 = r["n"] if isinstance(r, dict) else r[0]
             dc2.close()
-            if tot2 < 2000000:
-                return {"ok": False, "msg": f"暂不满足建库容量门槛（D仅{tot2}行，≥200万再拷）", "shard": ""}
+            if tot2 < _MIN_ROWS_FOR_NEW_SHARD:
+                return {"ok": False, "msg": f"暂不满足建库容量门槛（D评论仅{tot2}行，需≥{_MIN_ROWS_FOR_NEW_SHARD // 10000}万再拷；继续采集攒数据，或有未完成仓时会自动续拷）", "shard": ""}
         except: pass
     def _report(s):
         if progress_cb:
