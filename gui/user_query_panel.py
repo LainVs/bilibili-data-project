@@ -142,7 +142,9 @@ class UserQueryPanel(ttk.Frame):
             ))
             self._rows[iid] = {"kind": "弹幕", **d}
         self.lbl_count.configure(text=f"共 {len(comments) + len(danmaku)} 条（评论 {len(comments)} / 弹幕 {len(danmaku)}）")
-        self.btn_export.configure(state="normal" if self._rows else "disabled")
+        has_data = bool(self._rows)
+        self.btn_export.configure(state="normal" if has_data else "disabled")
+        self.btn_export_all.configure(state="normal" if has_data else "disabled")
 
     def _apply_user(self, gen: int, uid: int, user: dict | None, comments: list, danmaku: list) -> None:
         if gen != self._qgen:
@@ -165,7 +167,9 @@ class UserQueryPanel(ttk.Frame):
             iid = self.tree.insert("", "end", values=("弹幕", fmt_dt(d.get("ctime")), str(d.get("content",""))[:200], "", f"{d.get('bvid','')} {float(d.get('progress',0) or 0):.1f}s {title}"))
             self._rows[iid] = {"kind": "弹幕", **d}
         self.lbl_count.configure(text=f"共 {len(comments) + len(danmaku)} 条（评论 {len(comments)} / 弹幕 {len(danmaku)}）")
-        self.btn_export.configure(state="normal" if self._rows else "disabled")
+        has_data = bool(self._rows)
+        self.btn_export.configure(state="normal" if has_data else "disabled")
+        self.btn_export_all.configure(state="normal" if has_data else "disabled")
 
     def _export(self) -> None:
         """导出当前查询结果（全文，不受列表截断）为 CSV。"""

@@ -67,6 +67,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_stats.add_argument("--limit", type=int, default=5000, help="洞察抽样上限（默认5000）")
     p_stats.add_argument("--export", default="", help="导出CSV路径（总览+洞察三段）")
     p_stats.add_argument("--charts", default="", help="渲染趋势图到指定目录")
+
+    p_crack = sub.add_parser("crack", help="mid_hash -> UID 极速逆向破解")
+    p_crack.add_argument("hashes", nargs="+", help="一个或多个 8 位十六进制 mid_hash")
+    p_crack.add_argument("--all", action="store_true", help="显示所有可能的哈希碰撞候选")
+
+    sub.add_parser("doctor", help="系统全链路健康体检（DB连接/Cookie/磁盘/算法性能）")
+
+    p_export = sub.add_parser("export", help="数据导出 (CSV / JSONL)")
+    p_export.add_argument("--type", choices=["comments", "danmaku", "videos", "users"], default="comments", help="导出数据类型")
+    p_export.add_argument("--format", choices=["csv", "jsonl"], default="csv", help="导出格式")
+    p_export.add_argument("--bvid", default="", help="限定视频 BV")
+    p_export.add_argument("--uid", type=int, default=0, help="限定用户 UID")
+    p_export.add_argument("--output", required=True, help="导出文件路径")
+    p_export.add_argument("--limit", type=int, default=0, help="上限条数(0=不限)")
     return parser.parse_args(argv)
 
 
@@ -240,6 +254,79 @@ def main(argv: list[str] | None = None) -> int:
         for bvid in args.bvids:
             result = resolve_batch(bvid)
             logger.info("反查结果 %s: %s", bvid, result)
+        return 0
+
+    if args.command == "crack":
+        from crc32_crack.core import crack_candidates, crack_fast
+        for h in args.hashes:
+            h = h.strip().lower()
+            if args.all:
+                cands = crack_candidates(h)
+                if cands:
+                    print(f"{h} -> {len(cands)} 个候选: {cands} (推荐主候选: {cands[0]})")
+                else:
+                    print(f"{h} -> 未能破解")
+            else:
+                uid = crack_fast(h)
+                if uid is not None:
+                    print(f"{h} -> UID: {uid}")
+                else:
+                    print(f"{h} -> 未能破解")
+        return 0
+
+    if args.command == "doctor":
+        from tools.doctor import print_doctor_report
+        print_doctor_report()
+        return 0
+
+    if args.command == "export":
+        from storage import dao
+        import etl
+
+        rows = []
+        mapping = None
+        t = args.type
+        lim = args.limit if args.limit > 0 else 500000
+
+        if t == "comments":
+            mapping = etl.COMMENT_FIELDS
+            if args.uid:
+                rows = dao.query_comments_by_uid(args.uid, limit=lim)
+            elif args.bvid:
+                meta = dao.find_video_by_bvid(args.bvid)
+                if meta:
+                    rows = dao.query_comments_by_video(meta["aid"], limit=lim)
+            else:
+                res = dao.search_comments("的", limit=lim)
+                rows = res.get("rows", [])
+        elif t == "danmaku":
+            mapping = etl.DANMAKU_FIELDS
+            if args.uid:
+                rows = dao.query_danmaku_by_uid(args.uid, limit=lim)
+            elif args.bvid:
+                meta = dao.find_video_by_bvid(args.bvid)
+                if meta:
+                    rows = dao.query_danmaku_by_video(meta["aid"], limit=lim)
+            else:
+                res = dao.search_danmaku("的", limit=lim)
+                rows = res.get("rows", [])
+        elif t == "videos":
+            mapping = etl.VIDEO_FIELDS
+            rows = dao.query_recent_videos(limit=lim if lim < 500000 else None)
+        elif t == "users":
+            mapping = etl.USER_FIELDS
+            if args.uid:
+                u = dao.query_user(args.uid)
+                rows = [u] if u else []
+            else:
+                top_users = dao.query_up_stats()
+                rows = [{"uid": r["mid"], "uname": r.get("uname", ""), "fans": 0, "level": 0, "sex": "", "is_vip": 0, "signature": ""} for r in top_users[:lim]]
+
+        if args.format == "csv":
+            count = etl.export_to_csv(rows, args.output, field_mapping=mapping)
+        else:
+            count = etl.export_to_jsonl(rows, args.output)
+        print(f"成功导出 {count} 条记录到 {args.output}")
         return 0
 
     logger.error("未知命令: %s", args.command)

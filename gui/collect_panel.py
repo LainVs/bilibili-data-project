@@ -680,12 +680,36 @@ class CollectPanel(ttk.Frame):
     @staticmethod
     def _extract_bvid(text: str) -> str:
         text = text.strip()
-        if "bilibili.com/video/" in text:
+        if not text:
+            return ""
+        import re
+        # 1. 优先正则提取形如 BV1xx4y1z7Ab（不受中文标点、前后粘连汉字影响）
+        m = re.search(r"(?<![0-9a-zA-Z])(BV1[0-9A-Za-z]{9})(?![0-9a-zA-Z])", text, re.IGNORECASE)
+        if m:
+            bvid = m.group(1)
+            return "BV" + bvid[2:]
+        # 2. b23.tv 短链解析 (跟随重定向提取真实 BV)
+        if "b23.tv" in text or "bili2233.cn" in text:
+            url_m = re.search(r"https?://(?:b23\.tv|bili2233\.cn)/[0-9A-Za-z]+", text)
+            if url_m:
+                try:
+                    import requests
+                    resp = requests.head(url_m.group(0), allow_redirects=True, timeout=5,
+                                         headers={"User-Agent": "Mozilla/5.0"})
+                    m_b23 = re.search(r"(?<![0-9a-zA-Z])(BV1[0-9A-Za-z]{9})(?![0-9a-zA-Z])", resp.url, re.IGNORECASE)
+                    if m_b23:
+                        return "BV" + m_b23.group(1)[2:]
+                except Exception:
+                    pass
+        # 3. 兜底路径匹配
+        if "video/" in text:
             part = text.split("video/", 1)[1]
-            return part.split("/")[0].split("?")[0].strip()
+            candidate = part.split("/")[0].split("?")[0].strip()
+            if candidate.lower().startswith("bv"):
+                return "BV" + candidate[2:]
         for tok in text.split():
-            if tok.startswith("BV"):
-                return tok.split(",")[0].strip()
+            if tok.lower().startswith("bv"):
+                return "BV" + tok.split(",")[0].strip()[2:]
         return ""
 
     # ---------------- 批量UP ----------------

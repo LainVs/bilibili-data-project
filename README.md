@@ -34,34 +34,37 @@ python main.py serve
 ```
 
 其他:
+- `python main.py doctor` 系统全链路环境与健康体检（DB、Cookie、磁盘、跑分）
+- `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
+- `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV/JSONL)
 - `python main.py crawl --comments-only BVID` 只采评论
 - `python main.py crawl --bvid-file list.txt` 批量采集
 - `python main.py increment` 手动增量
 - `python main.py version`
 
-## 统计 V2（总览 + 排行榜 + 趋势洞察）
+## 核心特性与模块
 
-- GUI「统」面板新增「趋势洞察」页：关键词抽样 → 高频词 Top20 / 情感分布 /
-  每日趋势 / 24小时分布 / 长度·点赞·IP分布，图表存 `logs/stats_charts/`，
-  可导出 CSV。
-- 服务层 `analysis/stats_service.py`（GUI/CLI 共用）+ 纯函数
-  `analysis/text.py`（jieba 可选，缺失回退 2-gram）+ 图表
-  `visualization/charts.py`（matplotlib 可选，缺失降级文字）。
-- CLI：`python main.py stats --overview` 只打总览；
-  `python main.py stats --keyword 烂片 --days 30 --export out.csv --charts logs/stats_charts`
-- 单测（无DB）：`python -m pytest tests/test_stats_service.py -q`
+- **极速 CRC32 反查引擎 (`crc32_crack/`)**：采用双向折半（MITM）单字节逆向算法，彻底告别单向暴力穷举，1~8位数字秒级破（<10ms），9~10位毫秒级完成，自动支持哈希碰撞多候选识别。
+- **ETL 管道与清洗导出 (`etl/`)**：提供文本表情包净化、URL/@清除、IP属地规范化、用户行为与视频互动聚合画像，支持 UTF-8 BOM CSV 及 JSONL 流式导出。
+- **系统体检诊断 (`tools/doctor.py`)**：一键检测双库（D/E）延迟、Cookie 有效期、磁盘空间及算法引擎跑分。
+- **统计 V2 与可视化 (`analysis/` + `visualization/`)**：总览 10 项指标 + 5 大排行榜导出 + 趋势洞察（高频词、情感分布、24小时活跃度、每日趋势折线图）。
+- **GUI 交互优化**：支持 `b23.tv` 短链重定向自动解析、正则精确识别 BV 号、用户查询导出全部解锁、排行榜一键导出。
 
 ## 目录结构
 
 ```
-crawler/          # 采集层(api封装/清洗管道/任务编排)
-storage/          # MySQL 连接/DDL/DAO
-crc32_crack/      # mid_hash -> UID 反查(CRC32)
-config/           # 配置
-etl/analysis/visualization/   # 后续扩展
-docs/             # 方案与讨论文档
-tests/
-logs/
+crawler/          # 采集层(API封装/清洗管道/任务编排/限速风控)
+storage/          # MySQL 双库管理(D写缓冲/E归档小仓库/DAO/线程复用)
+crc32_crack/      # mid_hash -> UID 极速逆向破解(MITM算法)
+etl/              # ETL清洗规范化、维度聚合与多格式导出(CSV/JSONL)
+analysis/         # 文本分析与统计服务层(高频词/情感/时段)
+visualization/    # 数据图表生成(matplotlib折线/柱状图)
+gui/              # 桌面客户端(Obsidian单面板风格)
+tools/            # 数据库迁移、体检诊断与限速探针
+config/           # 配置文件
+docs/             # 设计与修复记录文档
+tests/            # 单元测试集
+logs/             # 运行与归档日志
 ```
 
 ## 注意事项

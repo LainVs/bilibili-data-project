@@ -244,8 +244,13 @@ class StatsPanel(ttk.Frame):
             nb.add(tab, text=title)
             tab.columnconfigure(0, weight=1)
             tab.rowconfigure(1, weight=1)
-            cnt = ttk.Label(tab, text="0 条", foreground="#888")
-            cnt.grid(row=0, column=0, sticky="w")
+            top_bar = ttk.Frame(tab)
+            top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+            cnt = ttk.Label(top_bar, text="0 条", foreground="#888")
+            cnt.pack(side="left")
+            btn_exp = ttk.Button(top_bar, text="导出本榜CSV",
+                                 command=lambda k=key, t=title, c=cols: self._export_rank_csv(k, t, c))
+            btn_exp.pack(side="right")
             tree = SmartTable(tab, show="headings")
             tree.set_columns(cols)
             tree.grid(row=1, column=0, sticky="nsew")
@@ -258,6 +263,31 @@ class StatsPanel(ttk.Frame):
         self._nb = nb
         self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消…", background="#fffbe6", foreground="#b36",
                                   font=("Microsoft YaHei UI", 11, "bold"), anchor="center")
+
+    def _export_rank_csv(self, key: str, title: str, cols: list[tuple]) -> None:
+        tree = self._rank_trees.get(key)
+        if not tree or not tree.get_children():
+            messagebox.showinfo("提示", "当前榜单暂无数据，请先刷新排行榜")
+            return
+        path = filedialog.asksaveasfilename(
+            title=f"导出{title}",
+            defaultextension=".csv",
+            filetypes=[("CSV 文件", "*.csv")],
+            initialfile=f"{title}.csv",
+        )
+        if not path:
+            return
+        import csv
+        headers = [c[1] for c in cols]
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                w.writerow(headers)
+                for iid in tree.get_children():
+                    w.writerow(tree.item(iid, "values"))
+            messagebox.showinfo("导出完成", f"已成功导出 {len(tree.get_children())} 条记录至:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("导出失败", f"写入文件失败: {exc}")
 
     # ---------------- 趋势洞察（统计 V2 新增页） ----------------
     def _build_insight_tab(self, nb: ttk.Notebook) -> None:
