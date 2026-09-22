@@ -178,8 +178,8 @@ class StatsPanel(ttk.Frame):
         # 数据总览卡片
         fm = ClaudeCard(wrap, title="核心数据指标（全库总览）", subtitle="涵盖已采视频、评论正文、弹幕流及真实 UID 逆向统计", padding=14)
         fm.grid(row=2, column=0, sticky="new", pady=(0, 10))
-        fm.columnconfigure(0, weight=1)
-        fm.columnconfigure(1, weight=1)
+        fm.body.columnconfigure(0, weight=1)
+        fm.body.columnconfigure(1, weight=1)
 
         labels = [
             ("采集视频数", "videos"),
@@ -196,8 +196,8 @@ class StatsPanel(ttk.Frame):
         entries: list[tuple[ttk.Label, str]] = []
         for i, (text, key) in enumerate(labels):
             r, c = divmod(i, 2)
-            lbl = ttk.Label(fm, text=f"{text}: --", style="Card.TLabel", anchor="w")
-            lbl.grid(row=r + 1, column=c, sticky="ew", padx=(0, 24), pady=3)
+            lbl = ttk.Label(fm.body, text=f"{text}: --", style="Card.TLabel", anchor="w")
+            lbl.grid(row=r, column=c, sticky="ew", padx=(0, 24), pady=3)
             entries.append((lbl, key))
         self._cells = entries
         # 真进度条（总览 10 步）
@@ -207,17 +207,17 @@ class StatsPanel(ttk.Frame):
         # 数据库位置与占用卡片
         db = ClaudeCard(wrap, title="底层 MySQL 存储引擎", subtitle="磁盘物理空间占用、内存占用与数据目录", padding=14)
         db.grid(row=4, column=0, sticky="new", pady=(0, 10))
-        db.columnconfigure(0, weight=1)
-        self.lbl_dbloc = ttk.Label(db, text="位置: --", style="Card.TLabel", anchor="w")
-        self.lbl_dbloc.grid(row=1, column=0, sticky="ew")
-        self.lbl_dbsize = ttk.Label(db, text="磁盘占用: --", style="Card.TLabel", anchor="w")
-        self.lbl_dbsize.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_dbmem = ttk.Label(db, text="内存: --", style="Card.TLabel", anchor="w")
-        self.lbl_dbmem.grid(row=3, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_dbtables = ttk.Label(db, text="表占用: --", style="CardHint.TLabel", anchor="w")
-        self.lbl_dbtables.grid(row=4, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_datadir = ttk.Label(db, text="数据目录: --", style="CardHint.TLabel", anchor="w")
-        self.lbl_datadir.grid(row=5, column=0, sticky="ew", pady=(2, 0))
+        db.body.columnconfigure(0, weight=1)
+        self.lbl_dbloc = ttk.Label(db.body, text="位置: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbloc.grid(row=0, column=0, sticky="ew")
+        self.lbl_dbsize = ttk.Label(db.body, text="磁盘占用: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbsize.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbmem = ttk.Label(db.body, text="内存: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbmem.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbtables = ttk.Label(db.body, text="表占用: --", style="CardHint.TLabel", anchor="w")
+        self.lbl_dbtables.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_datadir = ttk.Label(db.body, text="数据目录: --", style="CardHint.TLabel", anchor="w")
+        self.lbl_datadir.grid(row=4, column=0, sticky="ew", pady=(2, 0))
 
         # 排行榜（底部 Notebook）
         nb = ttk.Notebook(self)

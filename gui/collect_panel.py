@@ -19,7 +19,7 @@ from gui.crawl_worker import (
 )
 from gui.theme import C, F, S
 from gui.util import format_comment_line, format_danmaku_line, load_videos, video_summary
-from gui.widgets import PillTabs, SmartTable
+from gui.widgets import ClaudeBadge, ClaudeCard, PillTabs, SmartTable
 
 logger = logging.getLogger(__name__)
 
@@ -60,35 +60,6 @@ class CollectPanel(ttk.Frame):
         self.var_mode = tk.StringVar(value="video")
         self.var_target = tk.StringVar()
         self.cbo_videos: ttk.Combobox | None = None
-
-        def _on_mode(_e=None) -> None:
-            mode = self.var_mode.get()
-            entry_label.configure(
-                text={"video": "视频 BV / 链接:",
-                      "up": "UP主 UID:",
-                      "fav": "收藏夹用户 UID:",
-                      "rel": "关系用户 UID:",
-                      "batch": "批量UP:",
-                      "post": "帖子链接 / ID:"}[mode])
-            # 仅“关注/粉丝”模式显示方向与人数上限控件
-            for w in (lbl_dir, cbo_dir, lbl_max, spn_max):
-                if mode == "rel":
-                    w.pack(side="left", padx=(6 if w is lbl_dir else 0, 0))
-                else:
-                    try:
-                        w.pack_forget()
-                    except tk.TclError:
-                        pass
-            # 仅“批量UP”模式显示多行UID输入区
-            if mode == "batch":
-                self.batch_frame.grid(row=1, column=0, sticky="ew", padx=6)
-            else:
-                try:
-                    self.batch_frame.grid_forget()
-                except (AttributeError, tk.TclError):
-                    pass
-
-        self._on_mode = _on_mode  # 会话恢复/断点续采需要：切换模式界面同步
 
         def _on_mode(_e=None) -> None:
             mode = self.var_mode.get()

@@ -50,6 +50,12 @@ class C:
     BORDER_FOCUS  = "#da7756"   # 输入聚焦光圈
 
     # ── 语义状态色（Claude Pastel 柔和粉彩徽章体系） ──
+    SUCCESS       = "#1f7a37"
+    WARNING       = "#a36814"
+    ERROR         = "#b9382f"
+    DOT_RED       = "#da7756"
+    FG_HINT       = "#8c877d"
+
     SUCCESS_BG    = "#edf7ed"
     SUCCESS_FG    = "#1f7a37"
     SUCCESS_DOT   = "#2e9e4f"

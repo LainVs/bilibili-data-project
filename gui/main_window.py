@@ -122,8 +122,6 @@ class MainWindow(tk.Tk):
         holder.rowconfigure(0, weight=1)
         self._holder = holder
 
-        self._switch(PAGES[0][1])
-
     def _make_nav_btn(self, parent: tk.Frame, icon: str, label: str) -> tk.Canvas:
         """用 Canvas 绘制 Claude 风格的现代导航项：左侧垂直陶土指示条 + 悬停过渡。"""
         h = 52
@@ -275,8 +273,8 @@ class MainWindow(tk.Tk):
             except Exception:
                 pass
         active = data.get("active_panel")
-        if any(label == active for _, label, _ in PAGES):
-            self._switch(active)
+        target = active if (active and any(label == active for _, label, _ in PAGES)) else PAGES[0][1]
+        self._switch(target)
 
     def _save_session(self) -> None:
         panels = {}

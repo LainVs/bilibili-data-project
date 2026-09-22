@@ -53,7 +53,7 @@ class UserQueryPanel(ttk.Frame):
         )
         top_card.grid(row=0, column=0, sticky="ew", padx=S.PAD_PAGE, pady=(S.PAD_PAGE, 10))
 
-        bar = tk.Frame(top_card, bg=C.BG_CARD)
+        bar = tk.Frame(top_card.body, bg=C.BG_CARD)
         bar.pack(fill="x")
 
         ttk.Label(bar, text="用户 UID:", style="Secondary.TLabel").pack(side="left")
@@ -83,7 +83,7 @@ class UserQueryPanel(ttk.Frame):
         )
         self.info_card.grid(row=1, column=0, sticky="ew", padx=S.PAD_PAGE, pady=(0, 10))
 
-        self.lbl_user = ttk.Label(self.info_card, text="尚未检索", style="Secondary.TLabel")
+        self.lbl_user = ttk.Label(self.info_card.body, text="尚未检索", style="Secondary.TLabel")
         self.lbl_user.pack(anchor="w")
 
         # ── 底部发言结果卡片 ──
@@ -94,8 +94,8 @@ class UserQueryPanel(ttk.Frame):
             padding=12,
         )
         results_card.grid(row=2, column=0, sticky="nsew", padx=S.PAD_PAGE, pady=(0, S.PAD_PAGE))
-        results_card.columnconfigure(0, weight=1)
-        results_card.rowconfigure(1, weight=1)
+        results_card.body.columnconfigure(0, weight=1)
+        results_card.body.rowconfigure(0, weight=1)
 
         # 结果头部的统计徽章
         self.badge_count = ClaudeBadge(results_card.header_right, text="0 条记录", status="muted")
@@ -109,13 +109,13 @@ class UserQueryPanel(ttk.Frame):
             ("loc", "IP 属地", 10),
             ("meta", "关联视频与互动", 30),
         ]
-        self.tree = SmartTable(results_card, show="headings")
+        self.tree = SmartTable(results_card.body, show="headings")
         self.tree.set_columns(cols)
-        self.tree.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        self.tree.grid(row=0, column=0, sticky="nsew", pady=(4, 0))
 
-        sb = ttk.Scrollbar(results_card, command=self.tree.yview)
+        sb = ttk.Scrollbar(results_card.body, command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
-        sb.grid(row=1, column=1, sticky="ns", pady=(4, 0))
+        sb.grid(row=0, column=1, sticky="ns", pady=(4, 0))
 
         self.tree.bind("<Double-1>", self._on_double_click)
 
@@ -337,7 +337,7 @@ class UserQueryPanel(ttk.Frame):
         )
         card.pack(fill="both", expand=True, padx=12, pady=12)
 
-        txt = tk.Text(card, wrap="word", font=F.BODY)
+        txt = tk.Text(card.body, wrap="word", font=F.BODY)
         txt.pack(fill="both", expand=True)
         txt.insert("1.0", row.get("content", ""))
         txt.configure(state="disabled")

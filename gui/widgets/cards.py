@@ -60,7 +60,7 @@ class ClaudeCard(tk.Frame):
         master: tk.Misc,
         title: str = "",
         subtitle: str = "",
-        padding: int = 16,
+        padding: int = 14,
         bg: str = C.BG_CARD,
         **kw
     ):
@@ -83,6 +83,20 @@ class ClaudeCard(tk.Frame):
 
         if title or subtitle:
             self._build_header(title, subtitle)
+
+        # 核心：提供独立的 body 容器，内部无论用 pack 还是 grid 绝不与 header 冲突！
+        self.body = tk.Frame(self, bg=bg)
+        self.body.pack(fill="both", expand=True)
+
+    def columnconfigure(self, index, **kw):
+        if hasattr(self, "body"):
+            return self.body.columnconfigure(index, **kw)
+        return super().columnconfigure(index, **kw)
+
+    def rowconfigure(self, index, **kw):
+        if hasattr(self, "body"):
+            return self.body.rowconfigure(index, **kw)
+        return super().rowconfigure(index, **kw)
 
     def _build_header(self, title: str, subtitle: str) -> None:
         self._header = tk.Frame(self, bg=self._bg)
