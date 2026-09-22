@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from etl.cleaner import normalize_ip, sanitize_user_profile
+
 
 def normalize_video(meta: dict) -> dict:
     """视频元信息规范化（兼容 key 缺省）。"""
@@ -53,7 +55,7 @@ def normalize_comment(raw: dict, oid: int) -> dict:
         "content": str(raw.get("content", ""))[:4000],
         "like_num": int(raw.get("like_num", 0) or 0),
         "ctime": raw.get("ctime", 0),
-        "ip_location": str(raw.get("ip_location", "")),
+        "ip_location": normalize_ip(raw.get("ip_location")),
         "member": member,
     }
 
@@ -65,15 +67,27 @@ def build_user_records(comments: Iterable[dict], danmaku_uids: Iterable[tuple[in
         member = c.get("member") or {}
         uid = c.get("uid", 0)
         if uid:
-            user_map.setdefault(uid, {
-                "uid": uid,
-                "uname": str(member.get("uname", "")),
-                "level": int(member.get("level", 0) or 0),
-                "sex": str(member.get("sex", "")),
-                "is_vip": int(member.get("is_vip", 0) or 0),
-                "signature": str(member.get("signature", "")),
-            })
+            user_map.setdefault(
+                uid,
+                sanitize_user_profile({
+                    "uid": uid,
+                    "uname": str(member.get("uname", "")),
+                    "level": int(member.get("level", 0) or 0),
+                    "sex": str(member.get("sex", "")),
+                    "is_vip": int(member.get("is_vip", 0) or 0),
+                    "signature": str(member.get("signature", "")),
+                    "fans": 0,
+                }),
+            )
     for uid, _unused in danmaku_uids:
         if uid and uid not in user_map:
-            user_map[uid] = {"uid": uid, "uname": "", "level": 0, "sex": "", "is_vip": 0, "signature": ""}
+            user_map[uid] = {
+                "uid": uid,
+                "uname": "",
+                "level": 0,
+                "sex": "保密",
+                "is_vip": 0,
+                "signature": "",
+                "fans": 0,
+            }
     return list(user_map.values())

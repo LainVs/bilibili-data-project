@@ -10,12 +10,11 @@ import datetime as _dt
 import re
 from collections import Counter
 
+from etl.cleaner import clean_text
+
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 _CJK_SEQ_RE = re.compile(r"[\u4e00-\u9fff]+")
-_URL_RE = re.compile(r"https?://\S+|www\.\S+")
-_AT_RE = re.compile(r"@[^\s:,，：]+")
-_TAG_RE = re.compile(r"#[^#\s]+#?")
 
 # 精简停用词（命中即丢）：标点/语气/刷屏词
 STOPWORDS = frozenset(
@@ -38,18 +37,6 @@ NEG_WORDS = frozenset(
     "烂片难看尬尴尬水 plagiarism 抄袭".split()
     + ["烂", "差", "坑", "雷", "尬"]
 )
-
-
-def clean_text(s: str) -> str:
-    """清洗单条文本：去 URL/@/话题标签/多余空白，保留语义主体。"""
-    if not s:
-        return ""
-    s = str(s)
-    s = _URL_RE.sub("", s)
-    s = _AT_RE.sub("", s)
-    s = _TAG_RE.sub("", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s[:500]
 
 
 def _tokenize_fallback(text: str) -> list[str]:

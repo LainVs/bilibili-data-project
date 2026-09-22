@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         print("bilibili-data-project 0.1.0")
         return 0
 
-    if args.command == "gui":
+    if not args.command or args.command == "gui":
         from gui.main_window import run as run_gui
 
         run_gui()

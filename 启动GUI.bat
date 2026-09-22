@@ -12,6 +12,6 @@ if errorlevel 1 (
 
 echo [INFO] Starting BiliData GUI...
 set PYTHONPATH=%CD%
-python gui_entry.py
+python main.py
 endlocal
 exit /b 0
