@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from crawler.tasks.increment import incremental_update
+from gui.theme import C, F, S
 from gui.util import load_videos
 from gui.widgets import SmartTable
 
@@ -63,9 +64,9 @@ class UpdatePanel(ttk.Frame):
         # 当前状态栏
         status = ttk.LabelFrame(self, text="当前状态", padding=(4, 2))
         status.grid(row=1, column=0, sticky="ew", padx=6)
-        self.lbl_state = ttk.Label(status, text="空闲，等待开始", foreground="#666")
-        self.lbl_state.pack(side="left", padx=(4, 16))
-        self.lbl_progress = ttk.Label(status, text="进度: --", foreground="#b36")
+        self.lbl_state = ttk.Label(status, text="空闲，等待开始", style="Secondary.TLabel")
+        self.lbl_state.pack(side="left")
+        self.lbl_progress = ttk.Label(status, text="进度: --", foreground=C.ACCENT)
         self.lbl_progress.pack(side="left", padx=4)
         self.lbl_next = ttk.Label(status, text="")
         self.lbl_next.pack(side="right", padx=4)
@@ -76,7 +77,7 @@ class UpdatePanel(ttk.Frame):
         stream.columnconfigure(0, weight=1)
         stream.rowconfigure(0, weight=1)
         self.txt_stream = tk.Text(stream, height=8, wrap="word", state="disabled",
-                                  font=("Consolas", 9))
+                                  font=F.MONO_SM)
         sb0 = ttk.Scrollbar(stream, command=self.txt_stream.yview)
         self.txt_stream.configure(yscrollcommand=sb0.set)
         self.txt_stream.grid(row=0, column=0, sticky="nsew")
@@ -87,7 +88,7 @@ class UpdatePanel(ttk.Frame):
         log.grid(row=3, column=0, sticky="nsew", padx=6, pady=(6, 0))
         log.columnconfigure(0, weight=1)
         log.rowconfigure(0, weight=1)
-        self.txt = tk.Text(log, height=6, wrap="word", state="disabled", font=("Consolas", 9))
+        self.txt = tk.Text(log, height=6, wrap="word", state="disabled", font=F.MONO_SM)
         sb = ttk.Scrollbar(log, command=self.txt.yview)
         self.txt.configure(yscrollcommand=sb.set)
         self.txt.grid(row=0, column=0, sticky="nsew")

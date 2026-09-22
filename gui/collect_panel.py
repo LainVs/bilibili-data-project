@@ -17,6 +17,7 @@ from gui.crawl_worker import (
     PostCrawlWorker,
     UpCrawlWorker,
 )
+from gui.theme import C, F, S
 from gui.util import format_comment_line, format_danmaku_line, load_videos, video_summary
 from gui.widgets import SmartTable
 
@@ -128,7 +129,7 @@ class CollectPanel(ttk.Frame):
             padding=(4, 2))
         bf = ttk.Frame(self.batch_frame)
         bf.pack(fill="x")
-        self.txt_batch_uids = tk.Text(bf, height=3, width=42, font=("Consolas", 9))
+        self.txt_batch_uids = tk.Text(bf, height=3, width=42, font=F.MONO_SM)
         self.txt_batch_uids.pack(side="left", fill="both", expand=True, padx=(0, 6))
         ctrls = ttk.Frame(bf)
         ctrls.pack(side="right", anchor="n")
@@ -211,7 +212,7 @@ class CollectPanel(ttk.Frame):
         stream.rowconfigure(0, weight=1)
 
         self.txt = tk.Text(stream, height=16, wrap="none", state="disabled",
-                           font=("Consolas", 10), background="#fafafa")
+                           font=F.MONO, background=C.BG_CARD)
         sb_y = ttk.Scrollbar(stream, orient="vertical",
                              command=self._sb_yview_wrapper)
         sb_x = ttk.Scrollbar(stream, orient="horizontal", command=self.txt.xview)
@@ -235,7 +236,7 @@ class CollectPanel(ttk.Frame):
         self.prog = ttk.Progressbar(status, orient="horizontal",
                                     length=180, mode="determinate", maximum=100)
         self.prog.pack(side="left", padx=(0, 6))
-        self.lbl_vpos = ttk.Label(status, text="", foreground="#b36")
+        self.lbl_vpos = ttk.Label(status, text="", foreground=C.ACCENT)
         self.lbl_vpos.pack(side="left", padx=(0, 8))
         self.lbl_status = ttk.Label(status, text="就绪。输入 BV 或视频链接开始。")
         self.lbl_status.pack(side="left")
@@ -245,11 +246,11 @@ class CollectPanel(ttk.Frame):
         # 最底部：实时“正在干什么”指示条
         action = ttk.Frame(self, padding=(6, 2))
         action.grid(row=4, column=0, sticky="ew")
-        ttk.Label(action, text="正在:", foreground="#888").pack(side="left")
-        self.lbl_doing = ttk.Label(action, text="空闲", foreground="#b36",
-                                   font=("Microsoft YaHei UI", 9, "bold"))
+        ttk.Label(action, text="正在:", foreground=C.FG_HINT).pack(side="left")
+        self.lbl_doing = ttk.Label(action, text="空闲", foreground=C.ACCENT,
+                                   font=F.SUBTITLE)
         self.lbl_doing.pack(side="left", padx=(4, 12))
-        self.lbl_doing_cnt = ttk.Label(action, text="", foreground="#666")
+        self.lbl_doing_cnt = ttk.Label(action, text="", foreground=C.FG_SECONDARY)
         self.lbl_doing_cnt.pack(side="left")
 
     # ---------------- 会话状态（重启恢复） ----------------

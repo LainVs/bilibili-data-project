@@ -18,6 +18,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from gui.theme import C, F, S
 from gui.util import fmt_dt
 from gui.widgets import SmartTable
 from storage import dao
@@ -150,13 +151,13 @@ class SearchPanel(ttk.Frame):
 
         tip = ttk.Frame(self)
         tip.grid(row=1, column=0, sticky="ew", padx=8)
-        ttk.Label(tip, text="排除词(逗号分隔):", foreground="#888").pack(side="left")
+        ttk.Label(tip, text="排除词(逗号分隔):", style="Hint.TLabel").pack(side="left")
         self.var_exclude = tk.StringVar()
         ttk.Entry(tip, textvariable=self.var_exclude, width=24).pack(side="left", padx=(2, 8))
-        ttk.Label(tip, text="空格=同时含 · OR=任一含 · \"引号\"=精确短语（如：主龙 OR 白厄 / \"绝望的救世主\"）",
-                  foreground="#888").pack(side="left")
+        ttk.Label(tip, text="空格=同时含 · OR=任一含 · \"引号\"=精确短语",
+                  style="Hint.TLabel").pack(side="left")
         ttk.Label(tip, text="时间格式 2024-01-01（可留空）",
-                  foreground="#888").pack(side="right", padx=(6, 0))
+                  style="Hint.TLabel").pack(side="right", padx=(6, 0))
 
         # 主体：左侧结果区 + 右侧边栏
         body = ttk.Frame(self)

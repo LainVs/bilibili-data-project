@@ -17,6 +17,7 @@ from gui.crawl_worker import (
     MSG_PROGRESS,
     PopularCrawlWorker,
 )
+from gui.theme import C, F, S
 from gui.util import format_comment_line
 from gui.widgets import SmartTable
 
@@ -113,7 +114,7 @@ class BroadPanel(ttk.Frame):
         self.prog = ttk.Progressbar(prog, orient="horizontal", length=180,
                                     mode="determinate", maximum=100)
         self.prog.pack(side="left", padx=(0, 8))
-        self.lbl_vpos = ttk.Label(prog, text="", foreground="#b36")
+        self.lbl_vpos = ttk.Label(prog, text="", foreground=C.ACCENT)
         self.lbl_vpos.pack(side="left", padx=(0, 8))
         self.lbl_status = ttk.Label(prog, text="就绪。粘贴种子 UID 开始。")
         self.lbl_status.pack(side="left")
@@ -123,7 +124,7 @@ class BroadPanel(ttk.Frame):
         self.prog_total = ttk.Progressbar(prog2, orient="horizontal", length=140,
                                           mode="determinate", maximum=100, value=0)
         self.prog_total.pack(side="left", padx=(4, 0))
-        self.lbl_total = ttk.Label(prog2, text="0/0", foreground="#555")
+        self.lbl_total = ttk.Label(prog2, text="0/0", style="Secondary.TLabel")
         self.lbl_total.pack(side="left", padx=(4, 0))
 
         # 已处理 UP 表

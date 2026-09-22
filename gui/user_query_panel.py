@@ -4,6 +4,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from gui.theme import C, F, S
 from gui.util import fmt_dt
 from gui.widgets import SmartTable
 from storage import dao
@@ -74,7 +75,7 @@ class UserQueryPanel(ttk.Frame):
         self.tree.configure(yscrollcommand=sb.set)
         sb.grid(row=0, column=1, sticky="ns")
         self.tree.bind("<Double-1>", self._on_double_click)
-        hint = ttk.Label(results, text="双击任意一行可查看完整内容", foreground="#888")
+        hint = ttk.Label(results, text="双击任意一行可查看完整内容", style="Hint.TLabel")
         hint.grid(row=1, column=0, sticky="w", padx=2)
 
         self.lbl_count = ttk.Label(self, text="共 0 条")
@@ -262,7 +263,7 @@ class UserQueryPanel(ttk.Frame):
         win.transient(self.winfo_toplevel())
         win.grab_set()
 
-        txt = tk.Text(win, wrap="word", font=("Microsoft YaHei UI", 10))
+        txt = tk.Text(win, wrap="word", font=F.BODY)
         sb = ttk.Scrollbar(win, command=txt.yview)
         txt.configure(yscrollcommand=sb.set)
         txt.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)

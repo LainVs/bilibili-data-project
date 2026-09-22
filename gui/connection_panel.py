@@ -9,6 +9,7 @@ from tkinter import ttk
 import pymysql
 
 from config import get_config
+from gui.theme import C, F, S
 
 
 def _test_conn(cfg: dict, timeout: int = 3) -> tuple[bool, str]:
@@ -52,11 +53,11 @@ class ConnectionPanel(ttk.Frame):
 
     def _build(self):
         self.columnconfigure(0, weight=1)
-        ttk.Label(self, text="连接状态（点击检测，失败自动重连）", font=("", 10, "bold")).grid(row=0, column=0, sticky="w", padx=8, pady=(8,4))
+        ttk.Label(self, text="连接状态", style="Title.TLabel").grid(row=0, column=0, sticky="w", padx=S.PAD_PAGE, pady=(S.PAD_PAGE, S.PAD_ITEM))
 
         # D
-        f1 = ttk.LabelFrame(self, text="缓冲库 D（写入 3306）", padding=8)
-        f1.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        f1 = ttk.LabelFrame(self, text="缓冲库 D (写入 3306)", padding=S.PAD_CARD)
+        f1.grid(row=1, column=0, sticky="ew", padx=S.PAD_PAGE, pady=S.PAD_ITEM)
         f1.columnconfigure(1, weight=1)
         ttk.Label(f1, text="地址:").grid(row=0, column=0, sticky="e")
         self.lbl_d_addr = ttk.Label(f1, text="--")
@@ -69,8 +70,8 @@ class ConnectionPanel(ttk.Frame):
         self.lbl_d_conn.grid(row=2, column=1, sticky="w", padx=4)
 
         # E
-        f2 = ttk.LabelFrame(self, text="归档库 E（查询 3307）", padding=8)
-        f2.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        f2 = ttk.LabelFrame(self, text="归档库 E (查询 3307)", padding=S.PAD_CARD)
+        f2.grid(row=2, column=0, sticky="ew", padx=S.PAD_PAGE, pady=S.PAD_ITEM)
         f2.columnconfigure(1, weight=1)
         ttk.Label(f2, text="地址:").grid(row=0, column=0, sticky="e")
         self.lbl_e_addr = ttk.Label(f2, text="--")
@@ -83,35 +84,35 @@ class ConnectionPanel(ttk.Frame):
         self.lbl_e_conn.grid(row=2, column=1, sticky="w", padx=4)
 
         btns = ttk.Frame(self)
-        btns.grid(row=3, column=0, sticky="ew", padx=8, pady=8)
-        ttk.Button(btns, text="检测/重连", command=self.refresh).pack(side="left")
+        btns.grid(row=3, column=0, sticky="ew", padx=S.PAD_PAGE, pady=S.PAD_ITEM)
+        ttk.Button(btns, text="检测/重连", style="Accent.TButton", command=self.refresh).pack(side="left")
         ttk.Button(btns, text="管理员重连D", command=self._admin_start_d).pack(side="left", padx=6)
         ttk.Button(btns, text="断开D", command=self._admin_stop_d).pack(side="left", padx=6)
         ttk.Button(btns, text="管理员重连E", command=self._admin_start_e).pack(side="left", padx=6)
         ttk.Button(btns, text="断开E", command=self._admin_stop_e).pack(side="left", padx=6)
-        self.btn_archive = ttk.Button(btns, text="手动归档 D→E", command=self._manual_archive)
+        self.btn_archive = ttk.Button(btns, text="手动归档 D->E", command=self._manual_archive)
         self.btn_archive.pack(side="left", padx=6)
         self._archive_thread: threading.Thread | None = None
         self.btn_archive_cancel = ttk.Button(btns, text="取消归档", command=self._cancel_archive, state="disabled")
         self.btn_archive_cancel.pack(side="left", padx=6)
-        ttk.Button(btns, text="清理卡死", command=self._kill_stuck).pack(side="left", padx=6)
-        ttk.Button(btns, text="打开数据库设置", command=self._open_db).pack(side="left", padx=6)
-        self.lbl_tip = ttk.Label(btns, text="检测仅查看状态，重连/断开请点对应按钮（断开需管理员提权）", foreground="#888")
-        self.lbl_tip.pack(side="left", padx=8)
+        ttk.Button(btns, text="清理卡死", style="Danger.TButton", command=self._kill_stuck).pack(side="left", padx=6)
+        ttk.Button(btns, text="数据库设置", command=self._open_db).pack(side="left", padx=6)
+        self.lbl_tip = ttk.Label(btns, text="点击检测查看状态，重连/断开请点对应按钮", style="Hint.TLabel")
+        self.lbl_tip.pack(side="left", padx=S.PAD_ITEM)
         self._archive_stop = threading.Event()
 
-        # 归档进度与日志（空白处）
+        # 归档进度与日志
         prog_row = ttk.Frame(self)
-        prog_row.grid(row=4, column=0, sticky="ew", padx=8, pady=(4,2))
+        prog_row.grid(row=4, column=0, sticky="ew", padx=S.PAD_PAGE, pady=(S.PAD_ITEM, 2))
         self.prog = ttk.Progressbar(prog_row, mode="determinate", maximum=100)
         self.prog.pack(side="left", fill="x", expand=True)
-        self.lbl_prog = ttk.Label(prog_row, text="待归档")
-        self.lbl_prog.pack(side="left", padx=8)
-        log_frame = ttk.LabelFrame(self, text="归档日志", padding=4)
-        log_frame.grid(row=5, column=0, sticky="nsew", padx=8, pady=4)
+        self.lbl_prog = ttk.Label(prog_row, text="待归档", style="Secondary.TLabel")
+        self.lbl_prog.pack(side="left", padx=S.PAD_ITEM)
+        log_frame = ttk.LabelFrame(self, text="归档日志", padding=S.PAD_CARD)
+        log_frame.grid(row=5, column=0, sticky="nsew", padx=S.PAD_PAGE, pady=S.PAD_ITEM)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.txt_log = tk.Text(log_frame, height=8, wrap="word", state="disabled", font=("Consolas", 9))
+        self.txt_log = tk.Text(log_frame, height=8, wrap="word", state="disabled", font=F.MONO_SM)
         self.txt_log.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(log_frame, command=self.txt_log.yview)
         self.txt_log.configure(yscrollcommand=sb.set)
@@ -384,7 +385,7 @@ Get-Service MySQL80-E | Out-Host
                 self.after(0, lambda: self.lbl_tip.configure(text="归档失败"))
             finally:
                 self.after(0, lambda: self.btn_archive_cancel.configure(state="disabled"))
-                self.after(0, lambda: self.btn_archive.configure(state="normal", text="手动归档 D→E"))
+                self.after(0, lambda: self.btn_archive.configure(state="normal", text="手动归档 D->E"))
         self._archive_thread = threading.Thread(target=worker, daemon=True)
         self._archive_thread.start()
 
@@ -470,10 +471,10 @@ Get-Service MySQL80-E | Out-Host
         ok_e, msg_e = _test_conn(r)
 
         def upd():
-            self.lbl_d_svc.configure(text=svc_d, foreground="#080" if svc_d=="Running" else "#a00")
-            self.lbl_d_conn.configure(text="✓ "+msg_d if ok_d else "✗ "+msg_d, foreground="#080" if ok_d else "#a00")
-            self.lbl_e_svc.configure(text=svc_e, foreground="#080" if svc_e=="Running" else "#a00")
-            self.lbl_e_conn.configure(text="✓ "+msg_e if ok_e else "✗ "+msg_e, foreground="#080" if ok_e else "#a00")
+            self.lbl_d_svc.configure(text=svc_d, foreground=C.SUCCESS if svc_d=="Running" else C.ERROR)
+            self.lbl_d_conn.configure(text=msg_d if ok_d else msg_d, foreground=C.SUCCESS if ok_d else C.ERROR)
+            self.lbl_e_svc.configure(text=svc_e, foreground=C.SUCCESS if svc_e=="Running" else C.ERROR)
+            self.lbl_e_conn.configure(text=msg_e if ok_e else msg_e, foreground=C.SUCCESS if ok_e else C.ERROR)
             self.lbl_tip.configure(text="检测完成" if (ok_d and ok_e) else "部分未连通，E离线时查询回退到D")
             # 连接恢复即清除手动断开标记（服务可能被外部拉起，标记过期）
             try:

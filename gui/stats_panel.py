@@ -17,6 +17,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from gui.theme import C, F, S
 from gui.util import fmt_dt
 from gui.widgets import SmartTable
 from storage import dao
@@ -140,7 +141,7 @@ class StatsPanel(ttk.Frame):
         # 筛选行
         top = ttk.Frame(wrap)
         top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        ttk.Label(top, text="库内采集统计", font=("", 11, "bold")).pack(side="left")
+        ttk.Label(top, text="库内采集统计", style="Title.TLabel").pack(side="left")
         ttk.Label(top, text=" 时间从:").pack(side="left", padx=(16, 0))
         self.var_start = tk.StringVar()
         ttk.Entry(top, textvariable=self.var_start, width=11).pack(side="left", padx=2)
@@ -158,14 +159,14 @@ class StatsPanel(ttk.Frame):
         self.btn_stats_only = ttk.Button(top, text="仅刷新总览",
                                          command=lambda: self.refresh(mode="stats_only"))
         self.btn_stats_only.pack(side="right", padx=6)
-        self.lbl_updated = ttk.Label(top, text="", foreground="#888")
-        self.lbl_updated.pack(side="right", padx=8)
-        ttk.Label(top, text="时间/长度只作用于排行榜（总览为全量）", foreground="#888").pack(side="right", padx=8)
+        self.lbl_updated = ttk.Label(top, text="", style="Hint.TLabel")
+        self.lbl_updated.pack(side="left", padx=8)
+        ttk.Label(top, text="时间/长度只作用于排行榜（总览为全量）", style="Hint.TLabel").pack(side="right", padx=8)
 
         # 排行榜勾选行
         rank_row = ttk.Frame(wrap)
         rank_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-        ttk.Label(rank_row, text="刷新排行榜:", foreground="#666").pack(side="left")
+        ttk.Label(rank_row, text="刷新排行榜:", style="Secondary.TLabel").pack(side="left")
         self._rank_vars: dict[str, tk.BooleanVar] = {}
         for key, label in [("top_users", "发言人"), ("top_texts", "重复文案"),
                            ("top_liked", "最高赞"), ("top_videos", "热门视频"),
@@ -261,8 +262,8 @@ class StatsPanel(ttk.Frame):
             self._rank_cnts[key] = cnt
         self._build_insight_tab(nb)
         self._nb = nb
-        self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消…", background="#fffbe6", foreground="#b36",
-                                  font=("Microsoft YaHei UI", 11, "bold"), anchor="center")
+        self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消...", background=C.BG_TABLE_SEL, foreground=C.ACCENT,
+                                  font=F.SUBTITLE, anchor="center")
 
     def _export_rank_csv(self, key: str, title: str, cols: list[tuple]) -> None:
         tree = self._rank_trees.get(key)
@@ -323,11 +324,11 @@ class StatsPanel(ttk.Frame):
                    command=self.export_insights_csv).pack(side="left")
         ttk.Button(ctl, text="打开图表目录",
                    command=self.open_charts_dir).pack(side="left", padx=4)
-        self.lbl_insight_status = ttk.Label(ctl, text="", foreground="#888")
+        self.lbl_insight_status = ttk.Label(ctl, text="", style="Hint.TLabel")
         self.lbl_insight_status.pack(side="left", padx=8)
 
         self.lbl_insight_summary = ttk.Label(tab, text="输入关键词限定范围（留空=最新采样），点「生成洞察」。",
-                                             foreground="#555", wraplength=860,
+                                             style="Secondary.TLabel", wraplength=860,
                                              justify="left")
         self.lbl_insight_summary.grid(row=1, column=0, sticky="ew", pady=(0, 4))
 
@@ -338,7 +339,7 @@ class StatsPanel(ttk.Frame):
         body.rowconfigure(0, weight=1)
         left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        ttk.Label(left, text="高频词 Top20", foreground="#888").pack(anchor="w")
+        ttk.Label(left, text="高频词 Top20", style="Secondary.TLabel").pack(anchor="w")
         self.insight_terms = SmartTable(left, show="headings")
         self.insight_terms.set_columns([("term", "词", 22), ("cnt", "次数", 10)])
         self.insight_terms.pack(fill="both", expand=True)
@@ -346,9 +347,9 @@ class StatsPanel(ttk.Frame):
         right.grid(row=0, column=1, sticky="nsew")
         right.rowconfigure(1, weight=1)
         right.columnconfigure(0, weight=1)
-        ttk.Label(right, text="图表", foreground="#888").grid(row=0, column=0, sticky="w")
+        ttk.Label(right, text="图表", style="Secondary.TLabel").grid(row=0, column=0, sticky="w")
         self.lbl_insight_img = ttk.Label(right, text="（生成洞察后显示图表）",
-                                         anchor="center", background="#fafafa")
+                                         anchor="center", background=C.BG_CARD)
         self.lbl_insight_img.grid(row=1, column=0, sticky="nsew")
         # 缓存秒显：启动时若有上次 insights，直接显示文字部分
         self.after(600, self._show_cached_insights)

@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import pymysql
 
 from config import get_config, update_mysql_archive_config, update_mysql_config
+from gui.theme import C, F, S
 
 try:
     import pymysql.cursors
@@ -247,7 +248,7 @@ class DbConfigDialog(tk.Toplevel):
         self._save_connections_section()
         self._preset_combo["values"] = list(self._connections.keys())
         self._preset_var.set(name)
-        self._status.configure(text=f"配置「{name}」已保存", foreground="#080")
+        self._status.configure(text=f"配置「{name}」已保存", foreground=C.SUCCESS)
 
     def _save_connections_section(self) -> None:
         """把所有预设写回 settings.ini [connections] section。"""
@@ -290,7 +291,7 @@ class DbConfigDialog(tk.Toplevel):
                     text=f"当前: {row['d']}" if row else "当前: 查询失败"))
             except Exception as exc:
                 self.after(0, lambda: self._lbl_datadir.configure(
-                    text=f"当前: 无法读取（{exc}）", foreground="#a00"))
+                    text=f"当前: 无法读取（{exc}）", foreground=C.ERROR))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -372,13 +373,13 @@ class DbConfigDialog(tk.Toplevel):
         try:
             host, port, user, password, database = self._values()
         except ValueError:
-            self._status.configure(text="端口必须是数字", foreground="#a00")
+            self._status.configure(text="端口必须是数字", foreground=C.ERROR)
             return False
         # 写库 D
         try:
             conn = self._connect(host, port, user, password, database)
         except Exception as exc:
-            self._status.configure(text=f"写库D连接失败：{exc}", foreground="#a00")
+            self._status.configure(text=f"写库D连接失败：{exc}", foreground=C.ERROR)
             if not silent:
                 messagebox.showerror("写库失败", f"{exc}\n\n请检查D库 3306 是否启动")
             return False
@@ -387,7 +388,7 @@ class DbConfigDialog(tk.Toplevel):
                 cur.execute("SELECT VERSION() AS v")
                 ver = cur.fetchone()["v"]
         except Exception:
-            self._status.configure(text="写库D已连通但库不存在，保存后自动建库", foreground="#a60")
+            self._status.configure(text="写库D已连通但库不存在，保存后自动建库", foreground=C.WARNING)
             ver = "?"
         finally:
             try: conn.close()
@@ -403,13 +404,13 @@ class DbConfigDialog(tk.Toplevel):
                 ver2 = cur.fetchone()["v"]
             conn2.close()
             msg = f"写库D OK({ver})  归档库E OK({ver2})"
-            self._status.configure(text=msg, foreground="#080")
+            self._status.configure(text=msg, foreground=C.SUCCESS)
             if not silent:
                 messagebox.showinfo("连接成功", msg)
             return True
         except Exception as exc2:
             msg = f"写库D OK({ver})  归档库E未连通({exc2}) — 采集可用，查询将回退到D"
-            self._status.configure(text=msg, foreground="#a60")
+            self._status.configure(text=msg, foreground=C.WARNING)
             if not silent:
                 messagebox.showwarning("归档库未连通", f"{exc2}\n\n写库D正常，归档库E离线时查询将暂时走D，待E上线自动同步。")
             return True
@@ -418,10 +419,10 @@ class DbConfigDialog(tk.Toplevel):
         try:
             host, port, user, password, database = self._values()
         except ValueError:
-            self._status.configure(text="端口必须是数字", foreground="#a00")
+            self._status.configure(text="端口必须是数字", foreground=C.ERROR)
             return
         if not host or not user:
-            self._status.configure(text="主机和用户名不能为空", foreground="#a00")
+            self._status.configure(text="主机和用户名不能为空", foreground=C.ERROR)
             return
         # 归档库
         try:
@@ -429,7 +430,7 @@ class DbConfigDialog(tk.Toplevel):
             rp = int(self._vars_r["port"].get().strip() or port)
             rdb = self._vars_r["database"].get().strip() or database
         except ValueError:
-            self._status.configure(text="归档端口必须是数字", foreground="#a00")
+            self._status.configure(text="归档端口必须是数字", foreground=C.ERROR)
             return
         try:
             update_mysql_config(host=host, port=port, user=user, password=password, database=database)
@@ -440,4 +441,4 @@ class DbConfigDialog(tk.Toplevel):
         if self._test(silent=True):
             self.destroy()
         else:
-            self._status.configure(text="已保存，但有连接未通过", foreground="#a60")
+            self._status.configure(text="已保存，但有连接未通过", foreground=C.WARNING)
