@@ -119,6 +119,14 @@ class StatsPanel(ttk.Frame):
                 elif isinstance(payload, tuple) and payload and payload[0] == "insight":
                     _, ins, charts, summary = (payload + (None, {}, ""))[:4]
                     self._apply_insights(ins, charts or {}, summary or "")
+                elif isinstance(payload, tuple) and payload and payload[0] == "progress":
+                    _, d, t, txt = payload
+                    if txt:
+                        try: self._overlay.configure(text=txt)
+                        except tk.TclError: pass
+                    if d is not None and t is not None:
+                        try: self.prog.configure(value=d, maximum=t)
+                        except tk.TclError: pass
                 else:
                     self._apply(payload)
         except queue.Empty:
@@ -554,6 +562,11 @@ class StatsPanel(ttk.Frame):
 
             messagebox.showerror("错误", "时间范围无效：开始晚于结束")
             return
+        # 在主线程安全读取 Tkinter 变量（禁止在子线程中调用 .get()）
+        which = [k for k, v in self._rank_vars.items() if v.get()] if mode == "full" else []
+        rank_count = len(which)
+        max_prog_steps = 10 if mode == "stats_only" else (10 + rank_count)
+
         self._stats_stop = threading.Event()
         # 允许点击取消，所以保持可点
         self.btn_refresh.configure(state="normal", text="取消统计" if mode=="full" else "刷新")
@@ -563,7 +576,7 @@ class StatsPanel(ttk.Frame):
         else:
             self.btn_stats_only.configure(text="总览统计中…")
         try:
-            self.prog.configure(value=0, maximum=10)
+            self.prog.configure(value=0, maximum=max_prog_steps)
         except Exception: pass
         try:
             self._overlay.place(relx=0, rely=1.0, anchor="sw", relwidth=1, relheight=0.18)
@@ -581,15 +594,11 @@ class StatsPanel(ttk.Frame):
                           "top_liked": "最高赞评论", "top_videos": "被评论最多的视频",
                           "top_ups": "被评论最多的UP"}
             def _set_overlay(txt):
-                try: self.after(0, lambda t=txt: self._overlay.configure(text=t))
-                except Exception: pass
+                self._stats_q.put(("progress", None, None, txt))
+
             def _prog(done, total):
-                try:
-                    self.after(0, lambda d=done, t=total: self.prog.configure(value=d, maximum=15))
-                except Exception: pass
-            # 读取勾选的排行榜
-            which = [k for k, v in self._rank_vars.items() if v.get()]
-            rank_count = len(which)
+                self._stats_q.put(("progress", done, total, None))
+
             rank_done_idx = [0]
             def _stat_done(key, value, mark=None):
                 try:
@@ -599,12 +608,12 @@ class StatsPanel(ttk.Frame):
             try:
                 def _prog10(d, t):
                     name = STAT_NAMES[d-1] if 1 <= d <= len(STAT_NAMES) else f"总览 {d}/{t}"
-                    _set_overlay(f"统计中… 总览 {name} ({d}/{t})  点击「取消统计」可取消")
-                    _prog(d, 10 + rank_count)
+                    txt = f"统计中… 总览 {name} ({d}/{t})  点击「取消统计」可取消"
+                    self._stats_q.put(("progress", d, max_prog_steps, txt))
                 _set_overlay("统计中… 正在统计总览 (0/10)")
                 stats = dao.get_collection_stats(progress_cb=_prog10, stop_event=stop,
                                                  stat_done_cb=_stat_done)
-                self.after(0, lambda: self.prog.configure(value=10, maximum=10 + rank_count))
+                self._stats_q.put(("progress", 10, max_prog_steps, "总览就绪"))
             except dao.StatsCancelled:
                 pass
             except Exception as exc:
@@ -618,7 +627,7 @@ class StatsPanel(ttk.Frame):
                 if stats is not None and not stop.is_set():
                     try:
                         from gui.util import ping_main as _ping2
-                        self.after(0, lambda: _ping2(self, "统计"))
+                        self.after(0, lambda: _ping2(self, "统计洞察"))
                     except Exception:
                         pass
                 return
@@ -789,6 +798,11 @@ class StatsPanel(ttk.Frame):
                     lbl.configure(text="-- 读取失败 --")
             else:
                 self._fill_cells(stats)
+            self.prog.configure(value=10, maximum=10)
+            self.after(300, lambda: [
+                self.prog.configure(value=0),
+                self._overlay.place_forget()
+            ])
             return
         self._set_updated(f"上次更新: {updated}" if updated else "")
         # 总览
@@ -807,6 +821,10 @@ class StatsPanel(ttk.Frame):
                 for iid in tree.get_children():
                     tree.delete(iid)
                 self._rank_cnts[key].configure(text="-- 读取失败 --")
+            self.after(400, lambda: [
+                self.prog.configure(value=0),
+                self._overlay.place_forget()
+            ])
             return
         for key, tree in self._rank_trees.items():
             for iid in tree.get_children():
@@ -815,6 +833,10 @@ class StatsPanel(ttk.Frame):
             for r in rows:
                 tree.insert("", "end", values=self._fmt_row(key, r))
             self._rank_cnts[key].configure(text=f"{len(rows)} 条")
+        self.after(600, lambda: [
+            self.prog.configure(value=0),
+            self._overlay.place_forget()
+        ])
 
     def _fill_cells(self, stats: dict) -> None:
         """填充总览格子；_partial 标注的项追加警告后缀。"""

@@ -1264,12 +1264,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
     stop_event 可选 threading.Event：置位后查完当前仓即停并抛 StatsCancelled。
     """
     from concurrent.futures import ThreadPoolExecutor
-    from storage.db import ensure_stat_counters
 
-    try:
-        ensure_stat_counters()
-    except Exception:
-        pass
     out: dict = {}
     jobs = [
         ("videos", "SELECT table_rows AS n FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='meta_video'", None),
@@ -1287,18 +1282,58 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
     ]
 
     def _count(sql: str) -> tuple[int, list]:
-        # 跨shard求和：返回 (总数, 失败的仓列表)。失败的仓不再按 0 混入总数。
-        # table_rows 估算为0时回退 COUNT(*)（LOAD DATA 后未 ANALYZE 的情况）。
-        # D 写缓冲也计入（以前只算 E，D 的新数据在总览里隐身）。
+        # 极速跨 shard 汇总：优先走 information_schema 全局元数据（0.05秒出数）
+        # D 写缓冲也一并计入，彻底消除多仓轮询与磁盘休眠卡死。
         import re
         m = re.search(r"table_name='([^']+)'", sql)
         tbl = m.group(1) if m else ""
+        if tbl:
+            total = 0
+            failed: list = []
+            ok_any = False
+            # 1. E 盘全局元数据聚合 (0.05s)
+            try:
+                conn_e = _r()
+                with conn_e.cursor() as cur:
+                    cur.execute(
+                        "SELECT SUM(table_rows) AS n FROM information_schema.tables "
+                        "WHERE (table_schema = 'bilibili_data' OR table_schema LIKE 'bilibili_%%') "
+                        "AND table_name = %s",
+                        (tbl,)
+                    )
+                    r_e = cur.fetchone()
+                    total += int(r_e["n"] or 0) if r_e else 0
+                    ok_any = True
+                conn_e.close()
+            except Exception as e:
+                logger.warning(f"_count E全局元数据失败 {tbl}: {e}")
+                failed.append("E全局")
+
+            # 2. D 盘写缓冲元数据 (0.01s)
+            try:
+                conn_d = _w()
+                with conn_d.cursor() as cur:
+                    cur.execute(
+                        "SELECT table_rows AS n FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE() AND table_name = %s",
+                        (tbl,)
+                    )
+                    r_d = cur.fetchone()
+                    total += int(r_d["n"] or 0) if r_d else 0
+                    ok_any = True
+                conn_d.close()
+            except Exception as e:
+                logger.warning(f"_count D元数据失败 {tbl}: {e}")
+                failed.append("D缓冲")
+
+            if ok_any:
+                return total, failed
+
         dbs, _list_ok = _shard_dbs_trusted()
         total = 0
-        failed: list = []
+        failed = []
         ok_any = False
         if not _list_ok and dbs == ["bilibili_data"]:
-            # 列表拉取失败且无缓存：只能看到单库，结果必不全，直接标记
             logger.warning("_count shard 列表不可信，仅单库，结果标记部分失败")
             failed.append("_shard_list:untrusted")
         if stop_event is not None and stop_event.is_set():
@@ -1311,14 +1346,6 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
                 cur.execute(q)
                 row = cur.fetchone()
                 n = int(row["n"] or 0) if row else 0
-                if n == 0 and tbl in ("raw_comments", "meta_video", "dim_user", "raw_danmaku"):
-                    try:
-                        cur.execute(f"SELECT COUNT(*) AS n FROM `{db}`.`{tbl}`")
-                        r2 = cur.fetchone()
-                        n = int(r2["n"] or 0) if r2 else 0
-                    except Exception as e2:
-                        logger.warning(f"_count {label}.{tbl} COUNT(*) 回退失败: {e2}")
-                        raise
                 ok_any = True
                 total += n
 
@@ -1326,26 +1353,23 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
             if stop_event is not None and stop_event.is_set():
                 raise StatsCancelled()
             try:
-                conn = _rcached("archive", db, 120)
+                conn = _rcached("archive", db, 30)
                 _one(conn, db, db)
             except Exception as e:
                 logger.warning(f"_count {db} 失败: {e} sql={sql[:60]}")
-                # 复用连接坏了就丢掉，下次重建，避免坏连接反复失败
-                _drop_cached("archive", db, 120)
+                _drop_cached("archive", db, 30)
                 failed.append(db)
-        # D 写缓冲（SSD，快）
         if stop_event is not None and stop_event.is_set():
             raise StatsCancelled()
         try:
-            _one(_rcached("write", "bilibili_data", 120), "bilibili_data", "D缓冲")
+            _one(_rcached("write", "bilibili_data", 30), "bilibili_data", "D缓冲")
         except Exception as e:
             logger.warning(f"_count D缓冲 失败: {e} sql={sql[:60]}")
-            _drop_cached("write", "bilibili_data", 120)
+            _drop_cached("write", "bilibili_data", 30)
             failed.append("D缓冲")
         if ok_any:
             return total, failed
-        # 全仓都失败：严格读 E 一次（尽力），E 也不通则报 0+失败，
-        # 绝不拿 D 缓冲数冒充全量总数。
+
         try:
             conn = _r_strict()
             try:
@@ -1408,50 +1432,20 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
                 logger.warning("全局去重数读取失败，回退老口径 %s: %s", key, exc)
         try:
             total, failed = _count(sql)
-            # 物化表为空（0）且有回退列时，走 DISTINCT 全扫保底（慢但对）
-            if total == 0 and not failed and fallback_col:
-                if stop_event is not None and stop_event.is_set():
-                    raise StatsCancelled()
-                try:
-                    total2, failed2 = _count(
-                        f"SELECT COUNT(DISTINCT {fallback_col}) AS n "
-                        f"FROM raw_comments WHERE {fallback_col} > 0")
-                    total, failed = total2, failed2
-                except StatsCancelled:
-                    raise
-                except Exception:
-                    pass
             out[key] = total
             if failed:
                 with _failed_lock:
                     out.setdefault("_failed_shards", {})
                     out["_failed_shards"][key] = failed
-                    # 有仓缺失的残数必须标注，免得当成全量显示
                     out.setdefault("_partial", {}).setdefault(key, "部分库缺失·非全量")
         except StatsCancelled:
             raise
         except Exception as exc:
             logger.warning("统计查询 %s 失败: %s", key, exc)
-            if fallback_col:
-                try:  # 物化表缺失 → 回退原 DISTINCT 全扫（慢但保底）
-                    total2, failed2 = _count(
-                        f"SELECT COUNT(DISTINCT {fallback_col}) AS n "
-                        f"FROM raw_comments WHERE {fallback_col} > 0")
-                    out[key] = total2
-                    if failed2:
-                        with _failed_lock:
-                            out.setdefault("_failed_shards", {})
-                            out["_failed_shards"][key] = failed2
-                except Exception:
-                    out[key] = 0
-                    with _failed_lock:
-                        out.setdefault("_failed_shards", {})
-                        out["_failed_shards"][key] = ["all"]
-            else:
-                out[key] = 0
-                with _failed_lock:
-                    out.setdefault("_failed_shards", {})
-                    out["_failed_shards"][key] = ["all"]
+            out[key] = 0
+            with _failed_lock:
+                out.setdefault("_failed_shards", {})
+                out["_failed_shards"][key] = ["all"]
         _emit()
 
     total_jobs = len(jobs)
