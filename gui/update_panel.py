@@ -51,7 +51,7 @@ class UpdatePanel(ttk.Frame):
         ttk.Label(top, text="UP最大抓页数:").pack(side="left")
         self.var_max_pages = tk.StringVar(value="100")
         ttk.Spinbox(top, from_=1, to=500, textvariable=self.var_max_pages, width=5).pack(side="left", padx=4)
-        self.btn_toggle = ttk.Button(top, text="开始轮询", command=self._toggle)
+        self.btn_toggle = ttk.Button(top, text="开始轮询", style="Accent.TButton", command=self._toggle)
         self.btn_toggle.pack(side="left", padx=10)
         ttk.Button(top, text="立即补采一次", command=self._run_once).pack(side="left")
         ttk.Button(top, text="批量更新历史博主",
@@ -203,7 +203,7 @@ class UpdatePanel(ttk.Frame):
             if self._timer_id is not None:
                 self.after_cancel(self._timer_id)
                 self._timer_id = None
-            self.btn_toggle.configure(text="开始轮询")
+            self.btn_toggle.configure(text="开始轮询", style="Accent.TButton")
             self._append_log("=== 轮询已停止 ===")
             self._set_state("空闲，等待开始", progress="")
             return
@@ -215,7 +215,7 @@ class UpdatePanel(ttk.Frame):
         if minutes < 1:
             minutes = 1
         self._running = True
-        self.btn_toggle.configure(text="停止轮询")
+        self.btn_toggle.configure(text="停止轮询", style="Danger.TButton")
         self._append_log(f"=== 开始轮询，间隔 {minutes:.0f} 分钟 ===")
         self._run_once()
         self._schedule(minutes)

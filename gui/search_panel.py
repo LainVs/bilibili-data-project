@@ -143,7 +143,7 @@ class SearchPanel(ttk.Frame):
         self.var_sort = tk.StringVar(value="时间倒序")
         ttk.Combobox(top, textvariable=self.var_sort, width=8, state="readonly",
                      values=["时间倒序", "点赞倒序"]).pack(side="left", padx=(8, 0))
-        self.btn_search = ttk.Button(top, text="搜索", command=self._search)
+        self.btn_search = ttk.Button(top, text="搜索", style="Accent.TButton", command=self._search)
         self.btn_search.pack(side="left", padx=(10, 0))
         self.btn_export = ttk.Button(top, text="导出命中CSV", command=self._export,
                                      state="disabled")
@@ -236,28 +236,28 @@ class SearchPanel(ttk.Frame):
                   foreground="#888").pack(side="right")
 
         # ---- 右侧边栏 ----
-        sidebar = ttk.Frame(body, relief="groove", borderwidth=1)
+        sidebar = tk.Frame(body, bg=C.BG_CARD, highlightthickness=1, highlightbackground=C.BORDER)
         sidebar.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        ttk.Label(sidebar, text="分区", font=("", 9, "bold")).pack(pady=(6, 4))
-        self.btn_sec_cmt = ttk.Button(sidebar, text="评论", width=12,
+        tk.Label(sidebar, text="检索分区", font=F.SUBTITLE, bg=C.BG_CARD, fg=C.FG_PRIMARY).pack(pady=(10, 6), padx=8)
+        self.btn_sec_cmt = ttk.Button(sidebar, text="评论", width=11,
                                       command=lambda: self._set_sec("cmt"))
-        self.btn_sec_cmt.pack(pady=2)
-        self.btn_sec_dmk = ttk.Button(sidebar, text="弹幕", width=12,
+        self.btn_sec_cmt.pack(pady=3, padx=8)
+        self.btn_sec_dmk = ttk.Button(sidebar, text="弹幕", width=11,
                                       command=lambda: self._set_sec("dmk"))
-        self.btn_sec_dmk.pack(pady=2)
-        self.btn_sec_video = ttk.Button(sidebar, text="视频", width=12,
+        self.btn_sec_dmk.pack(pady=3, padx=8)
+        self.btn_sec_video = ttk.Button(sidebar, text="视频", width=11,
                                         command=lambda: self._set_sec("video"))
-        self.btn_sec_video.pack(pady=2)
+        self.btn_sec_video.pack(pady=3, padx=8)
         self._sec_btns = {"cmt": self.btn_sec_cmt, "dmk": self.btn_sec_dmk,
                           "video": self.btn_sec_video}
-        mdl_label = ttk.Label(
+        mdl_label = tk.Label(
             sidebar,
-            text="点分区按钮切换展示；\n列表=紧凑表格\n全文=完整正文+详情\n双击列表行可看高亮详情",
-            foreground="#888", justify="left", wraplength=110)
-        mdl_label.pack(pady=(14, 0), padx=4)
+            text="切换检索分区\n\n列表: 紧凑表格\n全文: 详细内容\n双击: 弹窗高亮",
+            font=F.SMALL, fg=C.FG_MUTED, bg=C.BG_CARD, justify="left", wraplength=100)
+        mdl_label.pack(pady=(14, 0), padx=8)
 
-        self.lbl_hint = ttk.Label(self, text="输入关键词后按回车或点搜索。空格=同时含（如：烂片 剧情差），OR=任一含（如：主龙 OR 白厄），\"引号\"=精确短语。",
-                                  foreground="#b36")
+        self.lbl_hint = ttk.Label(self, text="输入关键词后回车搜索。空格=同时含 · OR=任一含 · \"引号\"=精确短语",
+                                  style="Hint.TLabel")
         self.lbl_hint.grid(row=3, column=0, sticky="w", padx=8)
         self._fresh_sec_view()
         self._render_section_title()

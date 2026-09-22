@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from gui.theme import C, F, S
 from gui.util import fmt_dt
-from gui.widgets import SmartTable
+from gui.widgets import ClaudeBadge, ClaudeCard, SmartTable
 from storage import dao
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ class StatsPanel(ttk.Frame):
         ttk.Label(top, text="文案长度下限:").pack(side="left", padx=(12, 0))
         self.var_minlen = tk.StringVar(value="0")
         ttk.Spinbox(top, from_=0, to=200, textvariable=self.var_minlen, width=5).pack(side="left")
-        self.btn_refresh = ttk.Button(top, text="刷新", command=self.refresh)
+        self.btn_refresh = ttk.Button(top, text="刷新", style="Accent.TButton", command=self.refresh)
         self.btn_refresh.pack(side="right")
         self.btn_stats_only = ttk.Button(top, text="仅刷新总览",
                                          command=lambda: self.refresh(mode="stats_only"))
@@ -175,10 +175,11 @@ class StatsPanel(ttk.Frame):
             self._rank_vars[key] = var
             ttk.Checkbutton(rank_row, text=label, variable=var).pack(side="left", padx=(6, 0))
 
-        # 数据总览
-        fm = ttk.LabelFrame(wrap, text="数据总览", padding=(10, 8))
-        fm.grid(row=2, column=0, sticky="new", pady=(0, 8))
+        # 数据总览卡片
+        fm = ClaudeCard(wrap, title="核心数据指标（全库总览）", subtitle="涵盖已采视频、评论正文、弹幕流及真实 UID 逆向统计", padding=14)
+        fm.grid(row=2, column=0, sticky="new", pady=(0, 10))
         fm.columnconfigure(0, weight=1)
+        fm.columnconfigure(1, weight=1)
 
         labels = [
             ("采集视频数", "videos"),
@@ -195,30 +196,28 @@ class StatsPanel(ttk.Frame):
         entries: list[tuple[ttk.Label, str]] = []
         for i, (text, key) in enumerate(labels):
             r, c = divmod(i, 2)
-            lbl = ttk.Label(fm, text=f"{text}: --", anchor="w")
-            lbl.grid(row=r, column=c, sticky="ew", padx=(0, 24), pady=3)
+            lbl = ttk.Label(fm, text=f"{text}: --", style="Card.TLabel", anchor="w")
+            lbl.grid(row=r + 1, column=c, sticky="ew", padx=(0, 24), pady=3)
             entries.append((lbl, key))
         self._cells = entries
         # 真进度条（总览 10 步）
         self.prog = ttk.Progressbar(wrap, mode="determinate", maximum=10, value=0)
         self.prog.grid(row=3, column=0, sticky="ew", pady=(4, 0))
 
-        # 数据库位置与占用
-        db = ttk.LabelFrame(wrap, text="数据库（MySQL）", padding=(10, 8))
-        db.grid(row=4, column=0, sticky="new", pady=(0, 8))
+        # 数据库位置与占用卡片
+        db = ClaudeCard(wrap, title="底层 MySQL 存储引擎", subtitle="磁盘物理空间占用、内存占用与数据目录", padding=14)
+        db.grid(row=4, column=0, sticky="new", pady=(0, 10))
         db.columnconfigure(0, weight=1)
-        self.lbl_dbloc = ttk.Label(db, text="位置: --", anchor="w")
-        self.lbl_dbloc.grid(row=0, column=0, sticky="ew")
-        self.lbl_dbsize = ttk.Label(db, text="磁盘占用: --", anchor="w")
-        self.lbl_dbsize.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_dbmem = ttk.Label(db, text="内存: --", anchor="w")
-        self.lbl_dbmem.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_dbtables = ttk.Label(db, text="表占用: --", anchor="w",
-                                       foreground="#666")
-        self.lbl_dbtables.grid(row=3, column=0, sticky="ew", pady=(2, 0))
-        self.lbl_datadir = ttk.Label(db, text="数据目录: --", anchor="w",
-                                     foreground="#555")
-        self.lbl_datadir.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbloc = ttk.Label(db, text="位置: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbloc.grid(row=1, column=0, sticky="ew")
+        self.lbl_dbsize = ttk.Label(db, text="磁盘占用: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbsize.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbmem = ttk.Label(db, text="内存: --", style="Card.TLabel", anchor="w")
+        self.lbl_dbmem.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_dbtables = ttk.Label(db, text="表占用: --", style="CardHint.TLabel", anchor="w")
+        self.lbl_dbtables.grid(row=4, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_datadir = ttk.Label(db, text="数据目录: --", style="CardHint.TLabel", anchor="w")
+        self.lbl_datadir.grid(row=5, column=0, sticky="ew", pady=(2, 0))
 
         # 排行榜（底部 Notebook）
         nb = ttk.Notebook(self)

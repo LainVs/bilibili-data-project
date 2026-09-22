@@ -19,7 +19,7 @@ from gui.crawl_worker import (
 )
 from gui.theme import C, F, S
 from gui.util import format_comment_line, format_danmaku_line, load_videos, video_summary
-from gui.widgets import SmartTable
+from gui.widgets import PillTabs, SmartTable
 
 logger = logging.getLogger(__name__)
 
@@ -90,16 +90,59 @@ class CollectPanel(ttk.Frame):
 
         self._on_mode = _on_mode  # 会话恢复/断点续采需要：切换模式界面同步
 
-        rmodes = ttk.Frame(top)
-        rmodes.pack(side="left")
-        for key, text in (("video", "视频"), ("up", "UP主"),
-                          ("fav", "收藏夹"), ("rel", "关注/粉丝"),
-                          ("batch", "批量UP"), ("post", "帖子/专栏")):
-            ttk.Radiobutton(rmodes, text=text, value=key,
-                            variable=self.var_mode, command=_on_mode).pack(side="left")
+        def _on_mode(_e=None) -> None:
+            mode = self.var_mode.get()
+            try:
+                if hasattr(self, "pill_modes") and self.pill_modes.get() != mode:
+                    self.pill_modes.set(mode)
+            except Exception:
+                pass
+            entry_label.configure(
+                text={"video": "视频 BV / 链接:",
+                      "up": "UP主 UID:",
+                      "fav": "收藏夹用户 UID:",
+                      "rel": "关系用户 UID:",
+                      "batch": "批量UP:",
+                      "post": "帖子链接 / ID:"}[mode])
+            # 仅“关注/粉丝”模式显示方向与人数上限控件
+            for w in (lbl_dir, cbo_dir, lbl_max, spn_max):
+                if mode == "rel":
+                    w.pack(side="left", padx=(6 if w is lbl_dir else 0, 0))
+                else:
+                    try:
+                        w.pack_forget()
+                    except tk.TclError:
+                        pass
+            # 仅“批量UP”模式显示多行UID输入区
+            if mode == "batch":
+                self.batch_frame.grid(row=1, column=0, sticky="ew", padx=6)
+            else:
+                try:
+                    self.batch_frame.grid_forget()
+                except (AttributeError, tk.TclError):
+                    pass
+
+        self._on_mode = _on_mode  # 会话恢复/断点续采需要：切换模式界面同步
+
+        tabs = [
+            ("video", "视频"),
+            ("up", "UP主"),
+            ("fav", "收藏夹"),
+            ("rel", "关注/粉丝"),
+            ("batch", "批量UP"),
+            ("post", "帖子/专栏"),
+        ]
+        self.pill_modes = PillTabs(
+            top,
+            tabs=tabs,
+            initial_key=self.var_mode.get(),
+            on_change=lambda k: (self.var_mode.set(k), _on_mode()),
+        )
+        self.pill_modes.pack(side="left", padx=(0, 10))
+
         entry_label = ttk.Label(top, text="视频 BV / 链接:")
-        entry_label.pack(side="left", padx=(6, 0))
-        entry = ttk.Entry(top, textvariable=self.var_target, width=24)
+        entry_label.pack(side="left", padx=(2, 0))
+        entry = ttk.Entry(top, textvariable=self.var_target, width=22)
         entry.pack(side="left", padx=4)
         entry.bind("<Return>", lambda _e: self._toggle())
 
@@ -115,13 +158,13 @@ class CollectPanel(ttk.Frame):
 
         self.var_comments = tk.BooleanVar(value=True)
         self.var_danmaku = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="评论", variable=self.var_comments).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(top, text="评论", variable=self.var_comments).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(top, text="弹幕", variable=self.var_danmaku).pack(side="left", padx=4)
         self.var_incremental = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="增量(去重)", variable=self.var_incremental).pack(side="left", padx=6)
 
-        self.btn_start = ttk.Button(top, text="开始采集", command=self._toggle)
-        self.btn_start.pack(side="left", padx=(12, 0))
+        self.btn_start = ttk.Button(top, text="开始采集", style="Accent.TButton", command=self._toggle)
+        self.btn_start.pack(side="left", padx=(10, 0))
 
         # 批量采集：贴 UID + 勾选要采集的类型（运行中可追加）区（grid 在 row=1，由模式切换显示）
         self.batch_frame = ttk.LabelFrame(
@@ -588,7 +631,7 @@ class CollectPanel(ttk.Frame):
             return
         if self.worker is not None and self.worker.is_alive():
             self.worker.stop()
-            self.btn_start.configure(text="正在停止…")
+            self.btn_start.configure(text="正在停止…", state="disabled")
             return
         target = self.var_target.get().strip()
         if not target:
@@ -668,7 +711,7 @@ class CollectPanel(ttk.Frame):
 
         self.worker = worker
         self.worker.start()
-        self.btn_start.configure(text="停止采集")
+        self.btn_start.configure(text="停止采集", style="Danger.TButton", state="normal")
         self._reset_progress()
         self._doing_kind, self._doing_cnt = "", 0
         self._bread_video = ""
@@ -862,7 +905,7 @@ class CollectPanel(ttk.Frame):
                 self.worker = None
                 if was_batch:
                     self._on_batch_done()
-                self.btn_start.configure(text="开始采集")
+                self.btn_start.configure(text="开始采集", style="Accent.TButton", state="normal")
                 self._finish_progress()
                 was_batch_label = "批量采集已结束" if was_batch else "就绪。输入 BV 或视频链接开始。"
                 if self.var_mode.get() == "batch":

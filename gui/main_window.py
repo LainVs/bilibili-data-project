@@ -14,15 +14,15 @@ from storage.session import load_session, save_session
 
 logger = logging.getLogger(__name__)
 
-# 导航定义：图标字符 + 描述标签 + 悬停提示 + 面板类路径（懒加载）
+# 导航定义：图标字符 + 描述标签 + 面板类路径（懒加载）
 PAGES: list[tuple[str, str, str]] = [
-    ("连", "连接状态", "gui.connection_panel:ConnectionPanel"),
-    ("采", "定向采集", "gui.collect_panel:CollectPanel"),
-    ("增", "增量轮询", "gui.update_panel:UpdatePanel"),
-    ("查", "用户查询", "gui.user_query_panel:UserQueryPanel"),
-    ("广", "广泛采集", "gui.broad_panel:BroadPanel"),
-    ("统", "统计",     "gui.stats_panel:StatsPanel"),
-    ("搜", "全局搜索", "gui.search_panel:SearchPanel"),
+    ("⚡", "连接状态", "gui.connection_panel:ConnectionPanel"),
+    ("🎯", "定向采集", "gui.collect_panel:CollectPanel"),
+    ("🔄", "增量轮询", "gui.update_panel:UpdatePanel"),
+    ("👤", "用户查询", "gui.user_query_panel:UserQueryPanel"),
+    ("🌐", "广泛采集", "gui.broad_panel:BroadPanel"),
+    ("📊", "统计洞察", "gui.stats_panel:StatsPanel"),
+    ("🔍", "全局搜索", "gui.search_panel:SearchPanel"),
 ]
 
 
@@ -125,30 +125,33 @@ class MainWindow(tk.Tk):
         self._switch(PAGES[0][1])
 
     def _make_nav_btn(self, parent: tk.Frame, icon: str, label: str) -> tk.Canvas:
-        """用 Canvas 绘制一个导航按钮：圆角选中态 + 图标 + 小标签。"""
-        h = 50
-        c = tk.Canvas(parent, width=S.SIDEBAR_W - 12, height=h,
+        """用 Canvas 绘制 Claude 风格的现代导航项：左侧垂直陶土指示条 + 悬停过渡。"""
+        h = 52
+        w = S.SIDEBAR_W - 8
+        c = tk.Canvas(parent, width=w, height=h,
                       bg=C.BG_SIDEBAR, highlightthickness=0, bd=0,
                       cursor="hand2")
-        # 存储引用
         c._nav_icon = icon
         c._nav_label = label
         c._nav_active = False
 
-        # 绘制背景矩形（初始透明 = 同色）
+        # 背景微圆角块
         c._bg_rect = c.create_rectangle(
-            2, 2, S.SIDEBAR_W - 14, h - 2,
+            4, 2, w - 4, h - 2,
             fill=C.BG_SIDEBAR, outline="", width=0)
-        # 图标文字
+        # 激活指示线 (Claude Terracotta 竖条)
+        c._ind_id = c.create_rectangle(
+            4, 12, 7, h - 12,
+            fill="", outline="", width=0)
+        # 图标
         c._icon_id = c.create_text(
-            (S.SIDEBAR_W - 12) // 2, h // 2 - 7,
+            w // 2, h // 2 - 8,
             text=icon, font=F.NAV, fill=C.FG_NAV)
-        # 小标签
+        # 标签文字
         c._label_id = c.create_text(
-            (S.SIDEBAR_W - 12) // 2, h // 2 + 12,
+            w // 2, h // 2 + 13,
             text=label[:2], font=F.NAV_HINT, fill=C.FG_NAV)
 
-        # 事件绑定
         c.bind("<Enter>", lambda e, cv=c: self._nav_hover(cv, True))
         c.bind("<Leave>", lambda e, cv=c: self._nav_hover(cv, False))
         c.bind("<ButtonRelease-1>", lambda e, cv=c: self._switch(cv._nav_label))
@@ -162,6 +165,8 @@ class MainWindow(tk.Tk):
         try:
             cv.itemconfigure(cv._bg_rect,
                              fill=C.BG_NAV_HOVER if enter else C.BG_SIDEBAR)
+            cv.itemconfigure(cv._label_id,
+                             fill=C.FG_INVERSE if enter else C.FG_NAV)
         except tk.TclError:
             pass
 
@@ -170,6 +175,8 @@ class MainWindow(tk.Tk):
         try:
             cv.itemconfigure(cv._bg_rect,
                              fill=C.BG_NAV_ACTIVE if active else C.BG_SIDEBAR)
+            cv.itemconfigure(cv._ind_id,
+                             fill=C.ACCENT if active else "")
             cv.itemconfigure(cv._icon_id,
                              fill=C.FG_NAV_ACTIVE if active else C.FG_NAV)
             cv.itemconfigure(cv._label_id,

@@ -77,7 +77,7 @@ class BroadPanel(ttk.Frame):
 
         btns = ttk.Frame(top)
         btns.pack(fill="x", pady=(6, 0))
-        self.btn_start = ttk.Button(btns, text="开始广泛采集", command=self._toggle)
+        self.btn_start = ttk.Button(btns, text="开始广泛采集", style="Accent.TButton", command=self._toggle)
         self.btn_start.pack(side="left")
         self.btn_lib_seed = ttk.Button(btns, text="从库内UP起采（10个）",
                                        command=self._seed_from_library)
@@ -533,7 +533,7 @@ class BroadPanel(ttk.Frame):
         self._t0 = time.time()
         self.last_status = {}
         self.worker.start()
-        self.btn_start.configure(text="停止采集")
+        self.btn_start.configure(text="停止采集", style="Danger.TButton")
         self.btn_hot.configure(text="停止采集")
         self.btn_pause.configure(state="normal", text="暂停")
         try:
@@ -573,7 +573,7 @@ class BroadPanel(ttk.Frame):
                     self.after(120, self._poll)
                     return
                 self.worker = None
-                self.btn_start.configure(text="开始广泛采集")
+                self.btn_start.configure(text="开始广泛采集", style="Accent.TButton")
                 self.btn_hot.configure(text="一键采集热搜视频评论")
                 self.btn_pause.configure(state="disabled", text="暂停")
                 try:
