@@ -30,6 +30,16 @@ def _new_writer():
     return AsyncDbWriter()
 
 
+def _safe_emit(out_q: queue.Queue, msg_type: str, **fields) -> None:
+    """防爆队列转发：仅用于前端实时预览，堆积超过 200 条时丢弃瞬时预览帧，防止内存膨胀与 UI 卡死。"""
+    try:
+        if msg_type == MSG_ITEM and out_q.qsize() >= 200:
+            return
+        out_q.put({"type": msg_type, **fields})
+    except Exception:
+        pass
+
+
 class CrawlWorker(threading.Thread):
     """采集单个视频（评论+弹幕可选）的后台线程。"""
 
@@ -47,10 +57,7 @@ class CrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         client = ApiClient(stop_event=self._stop)
@@ -150,10 +157,7 @@ class UpCrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         client = ApiClient(stop_event=self._stop)
@@ -209,10 +213,7 @@ class FavCrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         try:
@@ -269,10 +270,7 @@ class RelationCrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         client = ApiClient(stop_event=self._stop)
@@ -360,10 +358,7 @@ class BatchUpWorker(threading.Thread):
         return self.queued - self.processed
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         idle_reported = False
@@ -476,10 +471,7 @@ class BroadCrawlWorker(threading.Thread):
         return self._pause.is_set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         from crawler.tasks.broad_crawl import broad_crawl
@@ -541,10 +533,7 @@ class PostCrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         from crawler.api.client import ApiClient
@@ -617,10 +606,7 @@ class PopularCrawlWorker(threading.Thread):
         self._stop.set()
 
     def _emit(self, msg_type: str, **fields) -> None:
-        try:
-            self.out_q.put({"type": msg_type, **fields})
-        except Exception:
-            pass
+        _safe_emit(self.out_q, msg_type, **fields)
 
     def run(self) -> None:
         from crawler.api.client import ApiClient

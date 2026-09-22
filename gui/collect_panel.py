@@ -24,9 +24,9 @@ from gui.widgets import ClaudeBadge, ClaudeCard, PillTabs, SmartTable
 logger = logging.getLogger(__name__)
 
 # 实时流行数上限：超出截掉头部，防 Tk Text 长行数 O(n) 卡死
-_MAX_STREAM_LINES = 3000
+_MAX_STREAM_LINES = 1500
 # 每个 120ms tick 最多渲染的评论/弹幕条数；超出的仅计数不渲染(数据仍写库)
-_ITEM_RENDER_BUDGET = 40
+_ITEM_RENDER_BUDGET = 30
 
 
 class CollectPanel(ttk.Frame):
@@ -548,6 +548,22 @@ class CollectPanel(ttk.Frame):
         if see:
             self._see_end()
 
+    def _append_batch(self, lines: list[str], *, see: bool = False) -> None:
+        """单次事务批量写入多行，大幅降低 Tk Text 组件重排开销。"""
+        if not lines:
+            return
+        try:
+            self.txt.configure(state="normal")
+            self.txt.insert("end", "\n".join(lines) + "\n")
+            first = int(self.txt.index("end-1c").split(".")[0])
+            if first > _MAX_STREAM_LINES:
+                self.txt.delete("1.0", f"{first - _MAX_STREAM_LINES // 2}.0")
+            self.txt.configure(state="disabled")
+            if see:
+                self._see_end()
+        except tk.TclError:
+            pass
+
     def _see_end(self) -> None:
         try:
             self.txt.see("end")
@@ -888,25 +904,54 @@ class CollectPanel(ttk.Frame):
         seen_any = False
         stick = self._stick_bottom  # 事件级跟踪：用户上翻即 False，不再被阈值误判
         rendered = 0
-        for _ in range(3000):
+        batch_lines: list[str] = []
+        new_cnt = {"comment": 0, "danmaku": 0}
+        paused = bool(self._pause_stream.get())
+
+        for _ in range(500):
             try:
                 msg = self.msg_q.get_nowait()
             except queue.Empty:
                 break
-            if msg.get("type") == MSG_ITEM:
-                if self._pause_stream.get():
-                    self._on_doing_item(msg.get("kind", "comment"))
-                    continue
-                if rendered >= _ITEM_RENDER_BUDGET:
-                    self._on_doing_item(msg.get("kind", "comment"))
-                    continue
-                rendered += 1
-            self._handle_msg(msg)
+            mtype = msg.get("type")
+            if mtype == MSG_ITEM:
+                k = msg.get("kind", "comment")
+                new_cnt[k] = new_cnt.get(k, 0) + 1
+                if not paused and rendered < _ITEM_RENDER_BUDGET:
+                    rendered += 1
+                    data = msg.get("data") or {}
+                    if k == "danmaku":
+                        batch_lines.append(format_danmaku_line(data))
+                    else:
+                        batch_lines.append(format_comment_line(data))
+                continue
+
+            self._handle_msg(msg, batch_lines=batch_lines, paused=paused)
             seen_any = True
-        if seen_any and stick:
+
+        # 1. 批量追加文本到 Text 控件（单次事务锁屏+写入，大幅消除 CPU 尖刺）
+        if batch_lines and not paused:
+            self._append_batch(batch_lines)
+            seen_any = True
+
+        # 2. 批量更新计数标签（每 120ms tick 仅更新一次，绝不触发高频 DOM 重排）
+        tot_new = new_cnt["comment"] + new_cnt["danmaku"]
+        if tot_new > 0:
+            if new_cnt["danmaku"] > new_cnt["comment"]:
+                self._doing_kind = "弹幕"
+            else:
+                self._doing_kind = "评论"
+            self._doing_cnt += tot_new
+            try:
+                self.lbl_doing_cnt.configure(text=f"{self._doing_kind} 已采 {self._doing_cnt} 条")
+                self._set_doing(f"{self._doing_root()}{self._doing_sub()}采集{self._doing_kind}")
+            except tk.TclError:
+                pass
+
+        if seen_any and stick and not paused:
             self._see_end()  # 仅在解锁跟随时回底；已上翻则保持阅读位置
 
-    def _handle_msg(self, msg: dict) -> None:
+    def _handle_msg(self, msg: dict, batch_lines: list[str] | None = None, paused: bool = False) -> None:
         mtype = msg.get("type")
         if mtype == MSG_META:
             if msg.get("post_id"):
@@ -921,20 +966,28 @@ class CollectPanel(ttk.Frame):
         elif mtype == MSG_PROGRESS:
             text = msg.get("text", "")
             self.lbl_status.configure(text=text)
-            # 进度也写入实时流，避免界面“看上去卡死”
-            self._append_line(f"→ {text}")
-            # UP 视频级进度 → 实时更新汇总表"已采集视频"
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(f"→ {text}")
+                else:
+                    self._append_line(f"→ {text}")
             self._on_up_progress(text)
             self._on_doing_progress(text)
         elif mtype == MSG_ITEM:
             data = msg.get("data") or {}
-            if msg.get("kind") == "danmaku":
-                self._append_line(format_danmaku_line(data))
-            else:
-                self._append_line(format_comment_line(data))
-            self._on_doing_item(msg.get("kind", "comment"))
+            line = format_danmaku_line(data) if msg.get("kind") == "danmaku" else format_comment_line(data)
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(line)
+                else:
+                    self._append_line(line)
         elif mtype == MSG_ERROR:
-            self._append_line(f"[错误] {msg.get('text', '')}")
+            err_txt = f"[错误] {msg.get('text', '')}"
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(err_txt)
+                else:
+                    self._append_line(err_txt)
             self.lbl_status.configure(text=f"错误：{msg.get('text', '')}")
             self._set_doing(f"出错：{msg.get('text', '')[:40]}")
         elif mtype == MSG_DONE:

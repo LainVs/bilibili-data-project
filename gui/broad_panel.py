@@ -24,9 +24,9 @@ from gui.widgets import SmartTable
 logger = logging.getLogger(__name__)
 
 # 实时流行数上限：超出截掉头部，防 Tk Text 长行数 O(n) 卡死
-_MAX_STREAM_LINES = 3000
+_MAX_STREAM_LINES = 1500
 # 每个 120ms tick 最多渲染的评论条数；超出的丢弃渲染(数据仍写库)
-_ITEM_RENDER_BUDGET = 40
+_ITEM_RENDER_BUDGET = 30
 
 FIELDS = [
     ("最大深度", "max_depth", "9999", 0),
@@ -190,6 +190,21 @@ class BroadPanel(ttk.Frame):
         self.txt.configure(state="disabled")
         if see:
             self._see_end()
+
+    def _append_batch(self, lines: list[str], *, see: bool = False) -> None:
+        if not lines:
+            return
+        try:
+            self.txt.configure(state="normal")
+            self.txt.insert("end", "\n".join(lines) + "\n")
+            first = int(self.txt.index("end-1c").split(".")[0])
+            if first > _MAX_STREAM_LINES:
+                self.txt.delete("1.0", f"{first - _MAX_STREAM_LINES // 2}.0")
+            self.txt.configure(state="disabled")
+            if see:
+                self._see_end()
+        except tk.TclError:
+            pass
 
     def _clear(self) -> None:
         self.txt.configure(state="normal")
@@ -597,24 +612,29 @@ class BroadPanel(ttk.Frame):
     def _drain(self) -> None:
         stick = self._stick_bottom
         rendered = 0
-        paused = self._pause_stream.get()
-        for _ in range(2000):
+        paused = bool(self._pause_stream.get())
+        batch_lines: list[str] = []
+
+        for _ in range(500):
             try:
                 msg = self.msg_q.get_nowait()
             except queue.Empty:
                 break
-            if msg.get("type") == MSG_ITEM:
-                if paused:
-                    continue
-                if rendered >= _ITEM_RENDER_BUDGET:
-                    continue
-                rendered += 1
+            mtype = msg.get("type")
+            if mtype == MSG_ITEM:
+                if not paused and rendered < _ITEM_RENDER_BUDGET:
+                    rendered += 1
+                    batch_lines.append(format_comment_line(msg.get("data") or {}))
+                continue
             try:
-                self._handle(msg)
+                self._handle(msg, batch_lines=batch_lines, paused=paused)
             except Exception as exc:
                 logger.warning("broad _handle 异常: %s", exc)
-        if stick:
-            self._see_end()  # 仅在解锁跟随时回底；已上翻则保持阅读位置
+
+        if batch_lines and not paused:
+            self._append_batch(batch_lines)
+            if stick:
+                self._see_end()  # 仅在解锁跟随时回底；已上翻则保持阅读位置
 
     def _fill_tree(self) -> None:
         def worker():
@@ -636,12 +656,16 @@ class BroadPanel(ttk.Frame):
             except Exception:
                 pass
 
-    def _handle(self, msg: dict) -> None:
+    def _handle(self, msg: dict, batch_lines: list[str] | None = None, paused: bool = False) -> None:
         mtype = msg.get("type")
         if mtype == MSG_PROGRESS:
             text = msg.get("text", "")
             self.lbl_status.configure(text=text)
-            self._append(f"→ {text}")
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(f"→ {text}")
+                else:
+                    self._append(f"→ {text}")
             m2 = re.search(r"\[(\d+)/(\d+)\]", text)
             if m2:
                 cur, total = int(m2.group(1)), int(m2.group(2))
@@ -653,9 +677,19 @@ class BroadPanel(ttk.Frame):
                 except tk.TclError:
                     pass
         elif mtype == MSG_ITEM:
-            self._append(format_comment_line(msg.get("data") or {}))
+            line = format_comment_line(msg.get("data") or {})
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(line)
+                else:
+                    self._append(line)
         elif mtype == MSG_ERROR:
-            self._append(f"[错误] {msg.get('text', '')}")
+            err_txt = f"[错误] {msg.get('text', '')}"
+            if not paused:
+                if batch_lines is not None:
+                    batch_lines.append(err_txt)
+                else:
+                    self._append(err_txt)
             self.lbl_status.configure(text=f"错误：{msg.get('text', '')}")
         elif mtype == MSG_DONE:
             stats = msg.get("stats") or {}
