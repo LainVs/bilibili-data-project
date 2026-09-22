@@ -564,7 +564,7 @@ class StatsPanel(ttk.Frame):
             self.btn_stats_only.configure(text="总览统计中…")
         try:
             self.prog.configure(value=0, maximum=10)
-        except: pass
+        except Exception: pass
         try:
             self._overlay.place(relx=0, rely=1.0, anchor="sw", relwidth=1, relheight=0.18)
             self._overlay.lift()
@@ -582,11 +582,11 @@ class StatsPanel(ttk.Frame):
                           "top_ups": "被评论最多的UP"}
             def _set_overlay(txt):
                 try: self.after(0, lambda t=txt: self._overlay.configure(text=t))
-                except: pass
+                except Exception: pass
             def _prog(done, total):
                 try:
                     self.after(0, lambda d=done, t=total: self.prog.configure(value=d, maximum=15))
-                except: pass
+                except Exception: pass
             # 读取勾选的排行榜
             which = [k for k, v in self._rank_vars.items() if v.get()]
             rank_count = len(which)
@@ -642,7 +642,7 @@ class StatsPanel(ttk.Frame):
                 _set_overlay(f"排行榜 {name} 完成 ({rank_done_idx[0]}/{rank_count})")
                 try:
                     self.after(0, lambda d=rank_done_idx[0]: self.prog.configure(value=10+d, maximum=10+rank_count))
-                except: pass
+                except Exception: pass
                 # 逐个落缓存（已完成的榜立即存盘，中断不丢；stats 为空不存防毒缓存）
                 if stats is not None:
                     try:
@@ -662,7 +662,7 @@ class StatsPanel(ttk.Frame):
                     _set_overlay(f"统计中… 排行榜 {name} ({d}/{rank_count})  点击「取消统计」可取消")
                     try:
                         self.after(0, lambda dd=d: self.prog.configure(value=10+dd, maximum=10+rank_count))
-                    except: pass
+                    except Exception: pass
                 ranks = dao.get_rankings(start=start, end=end, top=top_n,
                                          min_text_len=min_len, progress_cb=_prog_rank,
                                          stop_event=stop, which=which,

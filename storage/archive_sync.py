@@ -82,13 +82,15 @@ def _load_progress():
         import json
         if os.path.exists(_PROGRESS_FILE):
             with open(_PROGRESS_FILE, encoding="utf-8") as f: return json.load(f)
-    except: pass
+    except Exception:
+        pass
     return None
 def _save_progress(d: dict):
     try:
         import json
         with open(_PROGRESS_FILE, "w", encoding="utf-8") as f: json.dump(d, f)
-    except: pass
+    except Exception:
+        pass
 def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) -> dict:
     if _same_dsn():
         return {"ok": False, "msg": "D与E同库，不执行"}
@@ -112,7 +114,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                 offsets = prev.get("offsets", {})
             else:
                 copied_ids, offsets = {}, {}
-        except:
+        except Exception:
             shard = datetime.now().strftime(f"{_SHARD_PREFIX}%Y%m%d_%H%M%S")
             copied_ids, offsets = {}, {}
     else:
@@ -129,11 +131,13 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             dc2.close()
             if tot2 < _MIN_ROWS_FOR_NEW_SHARD:
                 return {"ok": False, "msg": f"暂不满足建库容量门槛（D评论仅{tot2}行，需≥{_MIN_ROWS_FOR_NEW_SHARD // 10000}万再拷；继续采集攒数据，或有未完成仓时会自动续拷）", "shard": ""}
-        except: pass
+        except Exception:
+            pass
     def _report(s):
         if progress_cb:
             try: progress_cb(s)
-            except: pass
+            except Exception:
+                pass
         logger.info(s)
     _report(f"建小仓库 {shard}")
     # 1. E建库+建表
@@ -247,7 +251,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                 e2.commit()
                 e2.close()
                 try: os.remove(out_path)
-                except: pass
+                except Exception: pass
                 ids_all.extend(r[pk] if isinstance(r, dict) else r[0] for r in rows)
                 loaded += len(rows)
                 try:
@@ -268,7 +272,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             return {"ok": False, "msg": f"{table} 失败: {exc}", "shard": shard}
         finally:
             try: os.remove(out_path)
-            except: pass
+            except Exception: pass
     # 3. 验对（HDD COUNT(*) 易 2013 超时，改用估算+重试，超时只警告不失败）
     _report("验对行数...")
     try:
@@ -301,7 +305,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                     break
                 except Exception as exc:
                     try: ec.close()
-                    except: pass
+                    except Exception: pass
                     if "2013" in str(exc) or "Lost connection" in str(exc):
                         # fail-closed：验对超时不断言成功，保留断点可续，不清 D
                         _report(f"验对 {table} 超时(2013)，判失败不清空D（断点已存，可续）")
@@ -490,7 +494,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
     finally:
         d.close()
     try: os.remove(_PROGRESS_FILE)
-    except: pass
+    except Exception: pass
     _report(f"完成，小仓库 {shard} 共 {total} 行")
     return {"ok": True, "msg": f"完成 {shard} {total}行", "shard": shard}
 

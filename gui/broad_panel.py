@@ -273,7 +273,7 @@ class BroadPanel(ttk.Frame):
                     import re as _re
                     m = _re.search(r"(\d+)\s*/", cur_txt)
                     if m: v_tot = int(m.group(1))
-                except: pass
+                except Exception: pass
             self.lbl_info_tot.configure(
                 text=(f"累计: 视频 {v_tot} 个 · "
                       f"评论 {st.get('comments', 0)} 条 · "
@@ -284,7 +284,7 @@ class BroadPanel(ttk.Frame):
                 proc = int(st.get('processed', 0) or 0)
                 max_u = st.get('max_ups', 0)
                 try: max_u = int(max_u)
-                except: max_u = 0
+                except Exception: max_u = 0
                 if max_u and max_u < 999999:
                     self.prog_total.configure(maximum=max_u, value=proc)
                     self.lbl_total.configure(text=f"{proc}/{max_u}")
@@ -292,7 +292,7 @@ class BroadPanel(ttk.Frame):
                     # 永续或大上限时用已处理数作进度
                     self.prog_total.configure(maximum=max(100, proc+10), value=proc)
                     self.lbl_total.configure(text=f"{proc} 已采")
-            except: pass
+            except Exception: pass
         except tk.TclError:
             pass
 
@@ -406,7 +406,7 @@ class BroadPanel(ttk.Frame):
     def _seed_done(self, uids: list[int] | None, err: str | None, src: str = "lib") -> None:
         self.btn_lib_seed.configure(state="normal", text="从库内UP起采（10个）")
         try: self.btn_hot_seed.configure(state="normal", text="从热搜UP起采")
-        except: pass
+        except Exception: pass
         if err or not uids:
             messagebox.showwarning("提示", err or "库内暂无已采集 UP")
             return
@@ -569,7 +569,7 @@ class BroadPanel(ttk.Frame):
                     try:
                         if getattr(self.worker, "is_paused", lambda: False)():
                             self.lbl_status.configure(text="已暂停")
-                    except: pass
+                    except Exception: pass
                     self.after(120, self._poll)
                     return
                 self.worker = None

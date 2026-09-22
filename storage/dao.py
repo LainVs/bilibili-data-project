@@ -1464,7 +1464,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
             done += 1
             if progress_cb:
                 try: progress_cb(done, total_jobs)
-                except: pass
+                except Exception: pass
     return out
 
 
@@ -1755,7 +1755,7 @@ def query_top_up_uids(limit: int = 5) -> list[int]:
         conn.close()
     except Exception:
         try: conn.close()
-        except: pass
+        except Exception: pass
     # D 不足 10 则补 E（DISTINCT 秒出）
     if len(agg) < limit:
         try:
@@ -1786,7 +1786,7 @@ def query_top_up_uids(limit: int = 5) -> list[int]:
                                         agg[mid] = 1
                                     if len(agg) >= 300:
                                         break
-                            except: continue
+                            except Exception: continue
                             if len(agg) >= 300:
                                 break
                     conn.close()
@@ -1858,7 +1858,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
                 break
             except Exception:
                 try: conn.close()
-                except: pass
+                except Exception: pass
                 continue
     if not merged:
         return []
@@ -1881,7 +1881,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
                 for r in cur.fetchall():
                     is_up_set.add(int(r["owner_uid"] if isinstance(r, dict) else r[0]))
             c2.close()
-        except: pass
+        except Exception: pass
         # E shards
         for db in shard_dbs:
             try:
@@ -1896,7 +1896,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
                     for r in cur.fetchall():
                         is_up_set.add(int(r["owner_uid"] if isinstance(r, dict) else r[0]))
                 c2.close()
-            except: pass
+            except Exception: pass
     for uid, v in merged.items():
         if uid not in is_up_set:
             continue
@@ -2793,7 +2793,7 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
             done_count[0] += 1
             if progress_cb:
                 try: progress_cb(done_count[0], total_jobs[0])
-                except: pass
+                except Exception: pass
 
     def _query_shard(db, sql, params):
         """单仓查询，返回 rows（线程复用连接，跨榜只建连一次）。"""
