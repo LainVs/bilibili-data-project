@@ -10,6 +10,26 @@ _thread = None
 def _get_conn(role: str):
     from storage.db import get_conn
     return get_conn(role)
+
+def _get_archive_conn(db_name: str, timeout: int = 600, dict_cursor: bool = False):
+    from config import get_config
+    cfg = get_config()
+    r = getattr(cfg, "mysql_archive", cfg.mysql)
+    kw = {
+        "host": r["host"],
+        "port": r["port"],
+        "user": r["user"],
+        "password": r["password"],
+        "database": db_name,
+        "charset": r.get("charset", "utf8mb4"),
+        "connect_timeout": 10,
+        "read_timeout": timeout,
+        "write_timeout": timeout,
+    }
+    if dict_cursor:
+        kw["cursorclass"] = pymysql.cursors.DictCursor
+    return pymysql.connect(**kw)
+
 def _same_dsn() -> bool:
     from config import get_config
     cfg = get_config()
@@ -198,7 +218,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                     w = csv.writer(f)
                     for r in rows:
                         w.writerow([_fmt(r[c]) for c in cols])
-                e2 = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=1200, write_timeout=600)
+                e2 = _get_archive_conn(shard, timeout=1200)
                 with e2.cursor() as cur:
                     cur.execute("SET SESSION innodb_lock_wait_timeout=60")
                     cur.execute("SET SESSION sql_mode=''")
@@ -262,7 +282,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                 try:
                     # 优先用 information_schema 秒出，COUNT(*) 兜底
                     if attempt == 1:
-                        ec = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=30, cursorclass=pymysql.cursors.DictCursor)
+                        ec = _get_archive_conn(shard, timeout=30, dict_cursor=True)
                         with ec.cursor() as cur:
                             cur.execute("SELECT table_rows AS n FROM information_schema.tables WHERE table_schema=%s AND table_name=%s", (shard, table))
                             r = cur.fetchone()
@@ -273,7 +293,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                         ec.close()
                         _report(f"验对 {table} 估算 {en} / 期望 {exp}")
                     else:
-                        ec = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=600, cursorclass=pymysql.cursors.DictCursor)
+                        ec = _get_archive_conn(shard, timeout=600, dict_cursor=True)
                         with ec.cursor() as cur:
                             cur.execute(f"SELECT COUNT(*) AS n FROM {table}")
                             r = cur.fetchone(); en = r["n"] if isinstance(r, dict) else r[0]
@@ -299,7 +319,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
         for table, pk, cols in need_fix:
             ids = copied_ids.get(table, [])
             # 查shard已有ids
-            ec = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=120)
+            ec = _get_archive_conn(shard, timeout=120)
             with ec.cursor() as cur:
                 cur.execute(f"SELECT {pk} FROM {table}")
                 have = set(r[0] if not isinstance(r, dict) else list(r.values())[0] for r in cur.fetchall())
@@ -321,7 +341,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                         cur.execute(f"SELECT {col_list} FROM {table} WHERE {pk} IN ({','.join(['%s']*len(_batch))})", tuple(_batch))
                         rows = cur.fetchall()
                     if not rows: continue
-                    em = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=300, write_timeout=300)
+                    em = _get_archive_conn(shard, timeout=300)
                     try:
                         with em.cursor() as cur:
                             cur.executemany(f"INSERT IGNORE INTO {table} ({col_list}) VALUES ({placeholders})", [tuple(r[c] if isinstance(r, dict) else r[_ci] for _ci, c in enumerate(cols)) for r in rows])
@@ -344,7 +364,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             if stop_flag is not None and stop_flag.is_set():
                 return {"ok": False, "msg": "二次验对中取消", "shard": shard}
             try:
-                ec = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=600, cursorclass=pymysql.cursors.DictCursor)
+                ec = _get_archive_conn(shard, timeout=600, dict_cursor=True)
                 with ec.cursor() as cur:
                     cur.execute(f"SELECT COUNT(*) AS n FROM {table}")
                     r = cur.fetchone(); en = r["n"] if isinstance(r, dict) else r[0]
@@ -359,7 +379,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             # 数量不对：分块查到底是缺还是多。缺=危险，继续失败；纯多=安全，放行。
             _missing = 0
             try:
-                ec2 = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database=shard, charset="utf8mb4", connect_timeout=10, read_timeout=600, cursorclass=pymysql.cursors.DictCursor)
+                ec2 = _get_archive_conn(shard, timeout=600, dict_cursor=True)
                 with ec2.cursor() as cur:
                     for _bi in range(0, len(ids), 5000):
                         if stop_flag is not None and stop_flag.is_set():
@@ -436,7 +456,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             prows = cur.fetchall()
         d2.close()
         if prows:
-            em = pymysql.connect(host="127.0.0.1", port=3307, user="root", password="REDACTED", database="bilibili_data", charset="utf8mb4", connect_timeout=10, read_timeout=60)
+            em = _get_archive_conn("bilibili_data", timeout=60)
             with em.cursor() as cur:
                 cur.executemany("REPLACE INTO crawl_progress (video_aid, danmaku_done, comment_done, last_error, update_time) VALUES (%s,%s,%s,%s,%s)",
                     [(r["video_aid"], r["danmaku_done"], r["comment_done"], r["last_error"], r["update_time"]) for r in prows])

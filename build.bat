@@ -15,7 +15,6 @@ if errorlevel 1 (
 )
 echo.
 echo ============ 打包完成 ============
-echo 程序目录: dist\BiliDataAnalyzer\
-echo 发送给朋友时，把整个 BiliDataAnalyzer 文件夹拷过去即可
-echo 对方机器需安装 MySQL 8（或连接远程 MySQL）
+echo 产物目录: dist\BiliDataAnalyzer\
+echo 运行环境: Windows x64, 目标机器需可连接 MySQL 8.0+ 数据库
 pause

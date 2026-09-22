@@ -30,6 +30,9 @@ storage/dead_letters/
 dist/
 build/
 *.egg-info/
+tests/_archive/
+tmp_*
+*.tmp
 
 # ========== Python ==========
 __pycache__/
