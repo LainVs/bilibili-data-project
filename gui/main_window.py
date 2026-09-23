@@ -567,7 +567,17 @@ class MainWindow(tk.Tk):
                     ["net", "start", "MySQL80"],
                     capture_output=True, text=True, timeout=15,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                return r.returncode == 0
+                if r.returncode == 0:
+                    return True
+                # 若因普通用户权限拒绝(Access Denied)，尝试调用 UAC 提权执行
+                if consecutive_failures <= 2:
+                    import ctypes
+                    ret = ctypes.windll.shell32.ShellExecuteW(
+                        None, "runas", "powershell.exe",
+                        '-NoProfile -Command "net start MySQL80"', None, 0
+                    )
+                    return ret > 32
+                return False
             except Exception:
                 return False
 

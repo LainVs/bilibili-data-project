@@ -141,8 +141,9 @@ def _check_databases() -> dict[str, Any]:
                 has_cmt = bool(cur.fetchone())
                 cmt_cnt = 0
                 if has_cmt:
-                    cur.execute("SELECT COUNT(*) FROM raw_comments")
-                    cmt_cnt = cur.fetchone()[0]
+                    cur.execute("SELECT table_rows FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='raw_comments'")
+                    r = cur.fetchone()
+                    cmt_cnt = int(r[0] or 0) if r else 0
                 cur.execute("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name LIKE 'bilibili_%'")
                 shards = cur.fetchone()[0]
             conn.close()

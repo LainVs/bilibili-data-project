@@ -29,9 +29,18 @@ def _test_conn(cfg: dict, timeout: int = 3) -> tuple[bool, str]:
             cur.execute("SELECT 1")
             cur.fetchone()
         c.close()
-        return True, "连接正常"
+        return True, "正常在线 (端口监听正常)"
     except Exception as exc:
-        return False, str(exc).splitlines()[0][:120]
+        err = str(exc).splitlines()[0]
+        if "10061" in err or "积极拒绝" in err:
+            return False, "服务未就绪 (10061 端口未监听，请点击下方「管理员重连」)"
+        if "1045" in err or "Access denied" in err:
+            return False, "认证失败 (账号或密码错误，请检查设置)"
+        if "1049" in err or "Unknown database" in err:
+            return False, "数据库未初始化 (保存配置将自动建库)"
+        if "timed out" in err.lower():
+            return False, "连接超时 (磁盘忙碌或休眠中)"
+        return False, err[:80]
 
 
 def _service_status(name: str) -> str:
@@ -222,6 +231,8 @@ class ConnectionPanel(ttk.Frame):
             clear_manual_offline("write")
         except Exception:
             pass
+        self.lbl_tip.configure(text="正在申请管理员权限启动 MySQL80 服务，请在系统 UAC 弹窗中点击「是」...")
+        self.badge_d.set_status("正在启动", status="info")
         try:
             ret = ctypes.windll.shell32.ShellExecuteW(
                 None,
@@ -234,12 +245,15 @@ class ConnectionPanel(ttk.Frame):
             if ret <= 32:
                 from tkinter import messagebox
 
-                messagebox.showwarning("提示", f"提权失败({ret})")
+                messagebox.showwarning("提权提示", f"管理员提权未确认或被取消 (代码 {ret})")
+                self.lbl_tip.configure(text="提权未确认，请重新点击「管理员重连 D」")
+            else:
+                self.lbl_tip.configure(text="已发起启动指令，正在等待 MySQL80 端口就绪...")
         except Exception as exc:
             from tkinter import messagebox
 
             messagebox.showerror("错误", str(exc))
-        self.after(4000, self.refresh)
+        self.after(3500, self.refresh)
 
     def _admin_stop_d(self) -> None:
         from tkinter import messagebox
@@ -347,6 +361,8 @@ class ConnectionPanel(ttk.Frame):
         except Exception:
             pass
 
+        self.lbl_tip.configure(text="正在申请管理员权限启动 MySQL80-E 归档服务，请在 UAC 弹窗中允许...")
+        self.badge_e.set_status("正在启动", status="info")
         ps = r"""
 $ErrorActionPreference="SilentlyContinue"
 net stop MySQL80-E 2>&1 | Out-Host
@@ -371,9 +387,10 @@ net start MySQL80-E 2>&1 | Out-Host
             if ret <= 32:
                 from tkinter import messagebox
 
-                messagebox.showwarning("提示", f"提权失败({ret})")
+                messagebox.showwarning("提权提示", f"管理员提权未确认或被取消 (代码 {ret})")
+                self.lbl_tip.configure(text="提权未确认，请重新点击「管理员重连 E」")
             else:
-                self.lbl_tip.configure(text="已提权执行拉起，15 秒后自动检测...")
+                self.lbl_tip.configure(text="已发起提权修复与拉起，正在等待 MySQL80-E 端口就绪...")
         except Exception as exc:
             from tkinter import messagebox
 

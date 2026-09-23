@@ -365,7 +365,8 @@ class BroadPanel(ttk.Frame):
 
     def _seed_from_library(self) -> None:
         """从库内 UP 起采：跨全库按评论数 Top 随机抽（后台，不卡UI）。"""
-        self.btn_lib_seed.configure(state="disabled", text="加载中…")
+        self.btn_lib_seed.configure(state="disabled", text="正在查询…")
+        self.lbl_status.configure(text="正在从数据库精选活跃 UP 主作为种子...")
 
         def worker() -> None:
             try:
@@ -375,9 +376,9 @@ class BroadPanel(ttk.Frame):
             except Exception as exc:
                 logger.warning("读取库内 UP 失败: %s", exc)
                 msg = f"读取库内 UP 失败：{exc}"
-                self.after(0, lambda m=msg: self._seed_done(None, m))
+                self.after(0, lambda m=msg: self._seed_done(None, m, src="lib"))
                 return
-            self.after(0, lambda u=uids: self._seed_done(u, None))
+            self.after(0, lambda u=uids: self._seed_done(u, None, src="lib"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -388,7 +389,8 @@ class BroadPanel(ttk.Frame):
         except ValueError:
             messagebox.showerror("错误", "热搜UP个数需为整数")
             return
-        self.btn_hot_seed.configure(state="disabled", text="加载中…")
+        self.btn_hot_seed.configure(state="disabled", text="正在获取…")
+        self.lbl_status.configure(text=f"正在请求 B站热搜榜单并解析前 {want} 个活跃 UP 主...")
         def worker(want_n: int = want) -> None:
             try:
                 from crawler.api.client import ApiClient
@@ -414,20 +416,36 @@ class BroadPanel(ttk.Frame):
             except Exception as exc:
                 logger.warning("热搜种子失败: %s", exc)
                 msg = f"热搜种子失败：{exc}"
-                self.after(0, lambda m=msg: self._seed_done(None, m))
+                self.after(0, lambda m=msg: self._seed_done(None, m, src="hot"))
         import threading
         threading.Thread(target=worker, daemon=True).start()
 
     def _seed_done(self, uids: list[int] | None, err: str | None, src: str = "lib") -> None:
-        self.btn_lib_seed.configure(state="normal", text="从库内UP起采（10个）")
-        try: self.btn_hot_seed.configure(state="normal", text="从热搜UP起采")
-        except Exception: pass
+        src_name = "库内活跃UP" if src == "lib" else "热搜榜单UP"
+        btn = self.btn_hot_seed if src == "hot" else self.btn_lib_seed
+        orig_text = "从热搜UP起采" if src == "hot" else "从库内UP起采（10个）"
+
         if err or not uids:
-            messagebox.showwarning("提示", err or "库内暂无已采集 UP")
+            btn.configure(state="normal", text=orig_text)
+            self.lbl_status.configure(text=f"载入失败：{err or '未获取到有效种子'}")
+            messagebox.showwarning("提示", err or f"{src_name}暂无可用种子 UP")
             return
+
         self.ent_seeds.delete("1.0", "end")
         self.ent_seeds.insert("1.0", "\n".join(str(u) for u in uids))
         self._refresh_db_size()
+
+        # 1. 按钮微交互反馈：变绿/提示成功，2.5秒后自动恢复
+        btn.configure(state="normal", text=f"✓ 已载入 {len(uids)} 个")
+        self.after(2500, lambda: btn.configure(text=orig_text))
+
+        # 2. 状态栏显式提示
+        preview = ", ".join(str(u) for u in uids[:4]) + ("..." if len(uids) > 4 else "")
+        msg = f"✓ 成功载入 {len(uids)} 个{src_name}种子 ({preview})，已填入上方文本框，点击「开始广泛采集」即可启动"
+        self.lbl_status.configure(text=msg)
+
+        # 3. 实时流打印
+        self._append(f"[种子载入] 成功从{src_name}载入 {len(uids)} 个种子 UID: {preview}")
 
     @staticmethod
     def _parse_seeds(text: str) -> list[int]:
