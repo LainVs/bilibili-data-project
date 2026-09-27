@@ -36,6 +36,7 @@ python main.py serve
 其他:
 - `python main.py doctor` 系统全链路环境与健康体检（DB、Cookie、磁盘、跑分）
 - `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
+- `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集打分，GUI「统计洞察」面板第 7 页签同步可用）
 - `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV/JSONL)
 - `python main.py crawl --comments-only BVID` 只采评论
 - `python main.py crawl --bvid-file list.txt` 批量采集

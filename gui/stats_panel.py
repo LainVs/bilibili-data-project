@@ -119,6 +119,9 @@ class StatsPanel(ttk.Frame):
                 elif isinstance(payload, tuple) and payload and payload[0] == "insight":
                     _, ins, charts, summary = (payload + (None, {}, ""))[:4]
                     self._apply_insights(ins, charts or {}, summary or "")
+                elif isinstance(payload, tuple) and payload and payload[0] == "detect":
+                    _, results, meta, total = (payload + (None, {}, 0))[:4]
+                    self._apply_detect(results or [], meta or {}, total or 0)
                 elif isinstance(payload, tuple) and payload and payload[0] == "progress":
                     _, d, t, txt = payload
                     if txt:
@@ -268,6 +271,7 @@ class StatsPanel(ttk.Frame):
             self._rank_trees[key] = tree
             self._rank_cnts[key] = cnt
         self._build_insight_tab(nb)
+        self._build_detect_tab(nb)
         self._nb = nb
         self._overlay = ttk.Label(nb, text="统计中，点击「取消统计」可取消...", background=C.BG_TABLE_SEL, foreground=C.ACCENT,
                                   font=F.SUBTITLE, anchor="center")
@@ -501,6 +505,192 @@ class StatsPanel(ttk.Frame):
         except Exception:
             messagebox.showinfo("图表目录", d)
 
+    # ---------------- 水军检测（第 7 个页签） ----------------
+    def _build_detect_tab(self, nb: ttk.Notebook) -> None:
+        """水军/刷屏/控评检测：按 BV 取数 → 后台打分 → 列表+导出。"""
+        tab = ttk.Frame(nb, padding=(6, 4))
+        nb.add(tab, text="水军检测")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+        self._detect_results: list[dict] = []
+
+        ctl = ttk.Frame(tab)
+        ctl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(ctl, text="视频 BV:").pack(side="left")
+        self.var_detect_bvid = tk.StringVar()
+        ent = ttk.Entry(ctl, textvariable=self.var_detect_bvid, width=22)
+        ent.pack(side="left", padx=2)
+        ent.bind("<Return>", lambda _e: self.refresh_detect())
+        ttk.Label(ctl, text="上限:").pack(side="left", padx=(8, 0))
+        self.var_detect_limit = tk.StringVar(value="5000")
+        ttk.Spinbox(ctl, from_=500, to=20000,
+                    textvariable=self.var_detect_limit, width=6).pack(side="left")
+        self.btn_detect = ttk.Button(ctl, text="开始检测",
+                                     command=self.refresh_detect)
+        self.btn_detect.pack(side="left", padx=8)
+        ttk.Button(ctl, text="导出CSV",
+                   command=self.export_detect_csv).pack(side="left")
+        ttk.Button(ctl, text="看该用户发言",
+                   command=self._detect_goto_user).pack(side="left", padx=4)
+        self.lbl_detect_status = ttk.Label(ctl, text="", style="Hint.TLabel")
+        self.lbl_detect_status.pack(side="left", padx=8)
+
+        self.lbl_detect_summary = ttk.Label(
+            tab, text="输入 BV（留空=最新采样兜底），点「开始检测」。结果仅供参考，请结合原文人工复核。",
+            style="Secondary.TLabel", wraplength=860, justify="left")
+        self.lbl_detect_summary.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+
+        body = ttk.Frame(tab)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.tree_detect = SmartTable(body, show="headings")
+        self.tree_detect.set_columns([
+            ("uid", "UID", 12), ("uname", "昵称", 16),
+            ("total", "发言数", 8), ("repeat", "复读率", 8),
+            ("burst", "爆发峰值", 9), ("ip", "Top属地", 10),
+            ("score", "评分", 7), ("level", "定级", 8),
+            ("hits", "命中信号", 16),
+        ])
+        self.tree_detect.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(body, command=self.tree_detect.yview)
+        self.tree_detect.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
+    def refresh_detect(self) -> None:
+        """后台线程执行检测，主线程通过队列回填（可重复点击=取消）。"""
+        th = getattr(self, "_detect_thread", None)
+        if th is not None and th.is_alive():
+            try:
+                self._detect_stop.set()
+            except Exception:
+                pass
+            self.btn_detect.configure(state="disabled", text="取消中…")
+            self.after(500, self._check_detect_join)
+            return
+        bvid = self.var_detect_bvid.get().strip()
+        try:
+            limit = max(500, min(20000, int(self.var_detect_limit.get() or 5000)))
+        except ValueError:
+            limit = 5000
+        self._detect_stop = threading.Event()
+        self.btn_detect.configure(state="normal", text="取消检测")
+        self.lbl_detect_status.configure(text="检测中…")
+        try:
+            for iid in self.tree_detect.get_children():
+                self.tree_detect.delete(iid)
+        except tk.TclError:
+            pass
+
+        def _worker() -> None:
+            try:
+                from analysis import stats_service as _svc
+                res = _svc.detect_for_video(bvid=bvid, limit=limit)
+                if self._detect_stop.is_set():
+                    return
+                self._stats_q.put(("detect", res.get("results") or [],
+                                   res.get("meta") or {}, res.get("total") or 0))
+            except Exception as exc:
+                logger.warning("水军检测失败: %s", exc)
+                try:
+                    self._stats_q.put(("detect", [], {}, 0))
+                except Exception:
+                    pass
+
+        self._detect_thread = threading.Thread(target=_worker, daemon=True)
+        self._detect_thread.start()
+
+    def _check_detect_join(self) -> None:
+        try:
+            th = getattr(self, "_detect_thread", None)
+            if th is not None and th.is_alive():
+                self.after(500, self._check_detect_join)
+                return
+            self.btn_detect.configure(state="normal", text="开始检测")
+            self.lbl_detect_status.configure(text="已取消")
+        except tk.TclError:
+            pass
+
+    def _apply_detect(self, results: list[dict], meta: dict, total: int) -> None:
+        try:
+            self.btn_detect.configure(state="normal", text="开始检测")
+        except tk.TclError:
+            return
+        self._detect_results = list(results or [])
+        try:
+            for iid in self.tree_detect.get_children():
+                self.tree_detect.delete(iid)
+            for r in self._detect_results:
+                level_txt = {"high": "高危", "suspect": "存疑"}.get(
+                    r.get("level"), "正常")
+                self.tree_detect.insert("", "end", values=(
+                    r.get("uid"), (r.get("uname") or "")[:16],
+                    r.get("total"), r.get("repeat_rate"),
+                    r.get("burst_max"),
+                    f"{r.get('ip_top') or '-'} {r.get('ip_ratio') or 0}",
+                    r.get("score"), level_txt,
+                    "+".join(r.get("hits") or []) or "-",
+                ))
+        except tk.TclError:
+            pass
+        try:
+            from analysis import stats_service as _svc
+            summary = _svc.detect_summary(
+                {"results": self._detect_results, "total": total})
+            title = ""
+            if meta and meta.get("bvid"):
+                title = f"{meta.get('bvid')} {(meta.get('title') or '')[:30]}｜"
+            self.lbl_detect_summary.configure(text=title + summary)
+            self.lbl_detect_status.configure(
+                text=f"样本 {total} 条 / 嫌疑 {len(self._detect_results)} 人")
+        except tk.TclError:
+            pass
+
+    def export_detect_csv(self) -> None:
+        if not getattr(self, "_detect_results", None):
+            messagebox.showinfo("导出", "暂无检测结果，先点「开始检测」。")
+            return
+        path = filedialog.asksaveasfilename(title="导出水军检测CSV",
+                                            defaultextension=".csv",
+                                            filetypes=[("CSV", "*.csv")],
+                                            initialfile="water_army.csv")
+        if not path:
+            return
+        try:
+            from analysis import stats_service as _svc
+            _svc.export_detect_csv(self._detect_results, path)
+            messagebox.showinfo("导出", f"已导出：{path}")
+        except Exception as exc:
+            messagebox.showerror("导出", f"导出失败：{exc}")
+
+    def _detect_goto_user(self) -> None:
+        sel = self.tree_detect.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在结果表中选中一行。")
+            return
+        try:
+            vals = self.tree_detect.item(sel[0], "values")
+            uid = str(vals[0]).strip()
+        except (tk.TclError, IndexError):
+            return
+        if not uid or not uid.isdigit():
+            return
+        top = self.winfo_toplevel()
+        switch = getattr(top, "_switch", None)
+        if not callable(switch):
+            messagebox.showinfo("提示", f"UID={uid}")
+            return
+        switch("用户查询")
+        try:
+            from gui.user_query_panel import UserQueryPanel
+            for panel in getattr(top, "_pages", {}).values():
+                if isinstance(panel, UserQueryPanel):
+                    panel.var_uid.set(uid)
+                    panel._query()
+                    break
+        except Exception as exc:
+            logger.warning("跳转用户查询失败: %s", exc)
+
     def snapshot_state(self) -> dict:
         """会话快照：统计筛选 + 洞察输入（供重启恢复）。"""
         try:
@@ -508,7 +698,9 @@ class StatsPanel(ttk.Frame):
                     "top": self.var_top.get(), "minlen": self.var_minlen.get(),
                     "kw": self.var_insight_kw.get(),
                     "days": self.var_insight_days.get(),
-                    "chart": self.var_insight_chart.get()}
+                    "chart": self.var_insight_chart.get(),
+                    "detect_bvid": self.var_detect_bvid.get(),
+                    "detect_limit": self.var_detect_limit.get()}
         except Exception:
             return {}
 
@@ -522,7 +714,9 @@ class StatsPanel(ttk.Frame):
                              (getattr(self, "var_minlen", None), "minlen"),
                              (getattr(self, "var_insight_kw", None), "kw"),
                              (getattr(self, "var_insight_days", None), "days"),
-                             (getattr(self, "var_insight_chart", None), "chart")):
+                             (getattr(self, "var_insight_chart", None), "chart"),
+                             (getattr(self, "var_detect_bvid", None), "detect_bvid"),
+                             (getattr(self, "var_detect_limit", None), "detect_limit")):
                 if var is not None and d.get(key) is not None:
                     var.set(str(d.get(key)))
         except Exception:

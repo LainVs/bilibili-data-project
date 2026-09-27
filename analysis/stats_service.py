@@ -259,3 +259,116 @@ def export_overview_csv(stats: dict, path: str) -> str:
         w.writerow(["指标", "数值"])
         w.writerows(overview_export_rows(stats))
     return path
+
+
+# ---------------- 水军检测（取数 + 编排，HDD 友好） ----------------
+
+def fetch_rows_for_detect(bvid: str = "", limit: int = 5000) -> tuple[list[dict], dict]:
+    """按 BV 取检测用发言行（评论+弹幕合并，分页上限保护）。
+
+    返回 (rows, meta)。失败返回 ([], {})，调用方显示占位。
+    """
+    try:
+        from storage import dao
+
+        rows: list[dict] = []
+        meta: dict = {}
+        if bvid.strip():
+            meta = dao.find_video_by_bvid(bvid.strip()) or {}
+            aid = meta.get("aid")
+            if not aid:
+                return [], {}
+            per = max(100, min(int(limit), 20000) // 2)
+            try:
+                for c in dao.query_comments_by_video(aid, limit=per) or []:
+                    c = dict(c)
+                    c["kind"] = "评论"
+                    rows.append(c)
+            except Exception as exc:
+                logger.warning("检测取评论失败: %s", exc)
+            try:
+                for d in dao.query_danmaku_by_video(aid, limit=per) or []:
+                    d = dict(d)
+                    d["kind"] = "弹幕"
+                    rows.append(d)
+            except Exception as exc:
+                logger.warning("检测取弹幕失败: %s", exc)
+            return rows, meta
+        # 留空：用洞察抽样兜底，保证无输入也有数据可看
+        try:
+            rows = sample_texts_for_insight(limit=min(int(limit), 5000))
+        except Exception:
+            rows = []
+        return rows, {}
+    except Exception as exc:
+        logger.warning("检测取数失败: %s", exc)
+        return [], {}
+
+
+def detect_for_video(bvid: str = "", limit: int = 5000, top: int = 50,
+                     min_texts: int = 5, repeat_threshold: float = 0.5,
+                     burst_threshold: int = 8) -> dict:
+    """水军检测编排：取数 → 纯函数打分 → Top 嫌疑人补昵称。
+
+    返回 {"meta","total","results"}。
+    """
+    from analysis.detect import detect_water_army
+
+    rows, meta = fetch_rows_for_detect(bvid=bvid, limit=limit)
+    results = detect_water_army(
+        rows, min_texts=min_texts, repeat_threshold=repeat_threshold,
+        burst_threshold=burst_threshold, top=top,
+    )
+    # 昵称补齐：只查 Top 20 缺昵称者，避免 HDD 上逐个查库
+    try:
+        from storage import dao
+
+        for r in results[:20]:
+            if not r.get("uname"):
+                try:
+                    u = dao.query_user(int(r["uid"]))
+                    if u and u.get("uname"):
+                        r["uname"] = u["uname"]
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"meta": meta, "total": len(rows), "results": results}
+
+
+def detect_summary(res: dict) -> str:
+    """检测一句话摘要（GUI/CLI 共用）。"""
+    results = (res or {}).get("results") or []
+    total = (res or {}).get("total") or 0
+    highs = sum(1 for r in results if r.get("level") == "high")
+    sus = sum(1 for r in results if r.get("level") == "suspect")
+    if not results:
+        return f"共分析 {total} 条发言，未发现可疑账号（可调低阈值或换视频）。"
+    top3 = "、".join(
+        f"{r.get('uname') or r.get('uid')}(分{r.get('score')})"
+        for r in results[:3]
+    )
+    return (f"共分析 {total} 条发言，可疑 {highs + sus} 人 "
+            f"(高危 {highs} / 存疑 {sus})，Top3：{top3}")
+
+
+def export_detect_csv(results: list[dict], path: str) -> str:
+    """导出检测结果为 CSV，返回实际路径。"""
+    import os
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["UID", "昵称", "发言数", "复读率", "高频文案",
+                    "复读次数", "10分钟爆发峰值", "Top属地",
+                    "属地占比", "评分", "定级", "命中信号"])
+        for r in results or []:
+            w.writerow([
+                r.get("uid"), r.get("uname") or "", r.get("total"),
+                r.get("repeat_rate"), r.get("top_text") or "",
+                r.get("top_text_count"), r.get("burst_max"),
+                r.get("ip_top") or "", r.get("ip_ratio"),
+                r.get("score"), r.get("level"),
+                "+".join(r.get("hits") or []),
+            ])
+    return path

@@ -81,6 +81,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_export.add_argument("--uid", type=int, default=0, help="限定用户 UID")
     p_export.add_argument("--output", required=True, help="导出文件路径")
     p_export.add_argument("--limit", type=int, default=0, help="上限条数(0=不限)")
+
+    p_detect = sub.add_parser("detect", help="水军/刷屏/控评检测")
+    p_detect.add_argument("--bvid", default="", help="限定视频 BV（留空=最新采样兜底）")
+    p_detect.add_argument("--limit", type=int, default=5000, help="分析发言上限（默认5000）")
+    p_detect.add_argument("--top", type=int, default=50, help="输出可疑人数上限（默认50）")
+    p_detect.add_argument("--repeat", type=float, default=0.5, help="复读率阈值（默认0.5）")
+    p_detect.add_argument("--burst", type=int, default=8, help="10分钟爆发条数阈值（默认8）")
+    p_detect.add_argument("--export", default="", help="导出CSV路径")
     return parser.parse_args(argv)
 
 
@@ -327,6 +335,28 @@ def main(argv: list[str] | None = None) -> int:
         else:
             count = etl.export_to_jsonl(rows, args.output)
         print(f"成功导出 {count} 条记录到 {args.output}")
+        return 0
+
+    if args.command == "detect":
+        from analysis import stats_service as _svc
+
+        res = _svc.detect_for_video(
+            bvid=args.bvid, limit=args.limit, top=args.top,
+            repeat_threshold=args.repeat, burst_threshold=args.burst,
+        )
+        meta = res.get("meta") or {}
+        if meta:
+            print(f"【视频】{meta.get('bvid', '')} {meta.get('title', '')[:40]}")
+        print("【检测】" + _svc.detect_summary(res))
+        for r in (res.get("results") or [])[: args.top]:
+            hits = "+".join(r.get("hits") or []) or "-"
+            print(f"  UID={r['uid']} {r.get('uname') or ''} "
+                  f"发言{r.get('total')} 复读率{r.get('repeat_rate')} "
+                  f"爆发{r.get('burst_max')} 属地{r.get('ip_top')}{r.get('ip_ratio')} "
+                  f"评分{r.get('score')} [{r.get('level')}] {hits}")
+        if args.export:
+            _svc.export_detect_csv(res.get("results") or [], args.export)
+            print(f"已导出：{args.export}")
         return 0
 
     logger.error("未知命令: %s", args.command)
