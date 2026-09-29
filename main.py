@@ -340,20 +340,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "detect":
         from analysis import stats_service as _svc
 
+        if hasattr(sys.stdout, "reconfigure"):
+            try:
+                sys.stdout.reconfigure(errors="replace")
+            except Exception:
+                pass
+
         res = _svc.detect_for_video(
             bvid=args.bvid, limit=args.limit, top=args.top,
             repeat_threshold=args.repeat, burst_threshold=args.burst,
         )
         meta = res.get("meta") or {}
-        if meta:
-            print(f"【视频】{meta.get('bvid', '')} {meta.get('title', '')[:40]}")
+        if meta and meta.get("bvid"):
+            print(f"【视频】{meta.get('bvid', '')} {(meta.get('title') or '')[:40]}")
         print("【检测】" + _svc.detect_summary(res))
         for r in (res.get("results") or [])[: args.top]:
             hits = "+".join(r.get("hits") or []) or "-"
-            print(f"  UID={r['uid']} {r.get('uname') or ''} "
-                  f"发言{r.get('total')} 复读率{r.get('repeat_rate')} "
-                  f"爆发{r.get('burst_max')} 属地{r.get('ip_top')}{r.get('ip_ratio')} "
-                  f"评分{r.get('score')} [{r.get('level')}] {hits}")
+            uname = str(r.get("uname") or "")
+            print(f"  UID={r['uid']:<10} {uname:<16} "
+                  f"发言{r.get('total'):<4} 复读率{r.get('repeat_rate'):<6} "
+                  f"爆发{r.get('burst_max'):<3} 属地{str(r.get('ip_top') or '-'):<4}{r.get('ip_ratio', 0):<5} "
+                  f"评分{r.get('score'):<5} [{r.get('level'):<7}] {hits}")
         if args.export:
             _svc.export_detect_csv(res.get("results") or [], args.export)
             print(f"已导出：{args.export}")

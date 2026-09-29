@@ -1949,51 +1949,164 @@ def _attach_counts(videos: list[dict]) -> list[dict]:
 
 
 def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> list[dict]:
-    """按对象(aid)查已入库评论（含 IP 属地），按时间倒序。"""
-    conn = _r()
+    """按对象(aid)查已入库评论（含 IP 属地），按 rpid 倒序（零排序耗时，秒级响应）。"""
+    rows: list[dict] = []
+    # 1. 优先查 E（归档主库）
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT rpid, video_aid, ref_type, parent, uid, content, like_num, "
-                "       ip_location, ctime "
-                "FROM raw_comments WHERE video_aid = %s AND ref_type = %s "
-                "ORDER BY ctime DESC LIMIT %s",
-                (aid, ref_type, limit),
-            )
-            return list(cur.fetchall())
-    finally:
-        conn.close()
+        conn = _r()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT rpid, video_aid, ref_type, parent, uid, content, like_num, "
+                    "       ip_location, ctime "
+                    "FROM raw_comments FORCE INDEX (idx_aid_type) "
+                    "WHERE video_aid = %s AND ref_type = %s "
+                    "ORDER BY rpid DESC LIMIT %s",
+                    (aid, ref_type, limit),
+                )
+                rows = list(cur.fetchall())
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("query_comments_by_video 查E失败: %s", exc)
+
+    # 2. 若未满额，补充查 D（写缓冲）
+    if len(rows) < limit:
+        try:
+            conn = _w()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT rpid, video_aid, ref_type, parent, uid, content, like_num, "
+                        "       ip_location, ctime "
+                        "FROM raw_comments "
+                        "WHERE video_aid = %s AND ref_type = %s "
+                        "ORDER BY rpid DESC LIMIT %s",
+                        (aid, ref_type, limit - len(rows)),
+                    )
+                    rows.extend(cur.fetchall())
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    return rows
 
 
 def query_danmaku_by_video(aid: int, limit: int = 500) -> list[dict]:
-    """按视频查已入库弹幕（附发送者信息），按时间倒序。"""
-    conn = _r()
+    """按视频查已入库弹幕（附发送者信息），按 id 倒序。"""
+    rows: list[dict] = []
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
-                "       d.ctime "
-                "FROM raw_danmaku d WHERE d.video_aid = %s "
-                "ORDER BY d.ctime DESC LIMIT %s",
-                (aid, limit),
-            )
-            return list(cur.fetchall())
-    finally:
-        conn.close()
+        conn = _r()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
+                    "       d.ctime "
+                    "FROM raw_danmaku d WHERE d.video_aid = %s "
+                    "ORDER BY d.id DESC LIMIT %s",
+                    (aid, limit),
+                )
+                rows = list(cur.fetchall())
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    if len(rows) < limit:
+        try:
+            conn = _w()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
+                        "       d.ctime "
+                        "FROM raw_danmaku d WHERE d.video_aid = %s "
+                        "ORDER BY d.id DESC LIMIT %s",
+                        (aid, limit - len(rows)),
+                    )
+                    rows.extend(cur.fetchall())
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    return rows
 
 
 def find_video_by_bvid(bvid: str) -> dict | None:
-    """按 bvid 查视频元信息（走 D 避免 E 卡）。"""
-    conn = _w()
+    """按 bvid 查视频元信息（优先 D，D 没有查 E，查不到时数学解码 aid 兜底）。"""
+    bvid = (bvid or "").strip()
+    if not bvid:
+        return None
+    # 1. 查 D
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
-                (bvid,),
-            )
-            return cur.fetchone()
-    finally:
-        conn.close()
+        conn = _w()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
+                    (bvid,),
+                )
+                r = cur.fetchone()
+                if r:
+                    return r
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # 2. 查 E
+    try:
+        conn = _r()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
+                    (bvid,),
+                )
+                r = cur.fetchone()
+                if r:
+                    return r
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # 3. 查各分仓
+    try:
+        dbs, _ = _shard_dbs_trusted()
+        for db in dbs:
+            if db == "bilibili_data":
+                continue
+            try:
+                conn = _open_conn("read", db, 3)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
+                            (bvid,),
+                        )
+                        r = cur.fetchone()
+                        if r:
+                            return r
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 4. 数学双射解码 aid 兜底（即使尚未入库 meta_video 也能精准拿到 aid 检索发言）
+    try:
+        from crawler.pipelines.clean import bvid_to_aid
+        aid = bvid_to_aid(bvid)
+        if aid:
+            return {"aid": aid, "bvid": bvid, "cid": 0, "title": bvid, "owner_uid": 0, "pubdate": 0}
+    except Exception:
+        pass
+
+    return None
 
 
 def _executemany(sql: str, rows: list[tuple], *, conn=None) -> int:

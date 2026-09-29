@@ -278,21 +278,22 @@ def fetch_rows_for_detect(bvid: str = "", limit: int = 5000) -> tuple[list[dict]
             aid = meta.get("aid")
             if not aid:
                 return [], {}
-            per = max(100, min(int(limit), 20000) // 2)
+            lim = max(100, min(int(limit), 20000))
             try:
-                for c in dao.query_comments_by_video(aid, limit=per) or []:
+                for c in dao.query_comments_by_video(aid, limit=lim) or []:
                     c = dict(c)
                     c["kind"] = "评论"
                     rows.append(c)
             except Exception as exc:
                 logger.warning("检测取评论失败: %s", exc)
-            try:
-                for d in dao.query_danmaku_by_video(aid, limit=per) or []:
-                    d = dict(d)
-                    d["kind"] = "弹幕"
-                    rows.append(d)
-            except Exception as exc:
-                logger.warning("检测取弹幕失败: %s", exc)
+            if len(rows) < lim:
+                try:
+                    for d in dao.query_danmaku_by_video(aid, limit=lim - len(rows)) or []:
+                        d = dict(d)
+                        d["kind"] = "弹幕"
+                        rows.append(d)
+                except Exception as exc:
+                    logger.warning("检测取弹幕失败: %s", exc)
             return rows, meta
         # 留空：用洞察抽样兜底，保证无输入也有数据可看
         try:
@@ -306,8 +307,8 @@ def fetch_rows_for_detect(bvid: str = "", limit: int = 5000) -> tuple[list[dict]
 
 
 def detect_for_video(bvid: str = "", limit: int = 5000, top: int = 50,
-                     min_texts: int = 5, repeat_threshold: float = 0.5,
-                     burst_threshold: int = 8) -> dict:
+                     min_texts: int = 3, repeat_threshold: float = 0.5,
+                     burst_threshold: int = 6) -> dict:
     """水军检测编排：取数 → 纯函数打分 → Top 嫌疑人补昵称。
 
     返回 {"meta","total","results"}。
@@ -340,6 +341,16 @@ def detect_summary(res: dict) -> str:
     """检测一句话摘要（GUI/CLI 共用）。"""
     results = (res or {}).get("results") or []
     total = (res or {}).get("total") or 0
+    meta = (res or {}).get("meta") or {}
+    bvid = meta.get("bvid", "")
+
+    if total == 0:
+        if bvid:
+            return (f"库内暂无视频 {bvid} 的发言记录（当前分析 0 条）。"
+                    f"若该视频此前采集在移动硬盘中，请确认外置硬盘 E: 是否已插好并在「连接状态」中启动 E 库；"
+                    f"或先在「定向采集」面板输入该 BV 号采集弹幕/评论后再检测。")
+        return "当前库内暂无匹配的发言记录（分析 0 条）。请先在「定向采集」面板采集视频数据后再行检测。"
+
     highs = sum(1 for r in results if r.get("level") == "high")
     sus = sum(1 for r in results if r.get("level") == "suspect")
     if not results:

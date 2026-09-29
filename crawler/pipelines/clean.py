@@ -5,6 +5,25 @@ from typing import Iterable
 
 from etl.cleaner import normalize_ip, sanitize_user_profile
 
+_BV_TABLE = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
+_BV_S = [11, 10, 3, 8, 4, 6]
+_BV_XOR = 177451812
+_BV_ADD = 8728348608
+
+
+def bvid_to_aid(bvid: str) -> int | None:
+    """B站官方数学双射：BV 号 -> 数字 avid。零网络开销，微秒级完成。"""
+    if not bvid or len(bvid) != 12:
+        return None
+    try:
+        tr = {c: i for i, c in enumerate(_BV_TABLE)}
+        r = 0
+        for i in range(6):
+            r += tr[bvid[_BV_S[i]]] * (58 ** i)
+        return (r - _BV_ADD) ^ _BV_XOR
+    except Exception:
+        return None
+
 
 def normalize_video(meta: dict) -> dict:
     """视频元信息规范化（兼容 key 缺省）。"""
