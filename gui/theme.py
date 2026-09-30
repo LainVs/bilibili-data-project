@@ -261,3 +261,70 @@ def apply_theme(root: tk.Tk) -> None:
     root.option_add("*Text.selectBackground", C.ACCENT_LIGHT)
     root.option_add("*Text.selectForeground", C.FG_PRIMARY)
     root.option_add("*Text.insertBackground", C.ACCENT)
+
+    # 自动为全应用 tk.Text 注入全选 (Ctrl+A) 与右键复制上下文菜单
+    _patch_text_widgets()
+
+
+def _patch_text_widgets() -> None:
+    _orig_text_init = tk.Text.__init__
+
+    def _auto_text_init(self, *args, **kwargs):
+        _orig_text_init(self, *args, **kwargs)
+        try:
+            _attach_text_context_menu(self)
+        except Exception:
+            pass
+
+    tk.Text.__init__ = _auto_text_init
+
+
+def _attach_text_context_menu(txt: tk.Text) -> None:
+    def _select_all(e=None):
+        txt.tag_add("sel", "1.0", "end-1c")
+        return "break"
+
+    def _copy_text(text: str):
+        if not text:
+            return
+        try:
+            txt.clipboard_clear()
+            txt.clipboard_append(text)
+            txt.update()
+            from gui.widgets.table import show_toast
+            show_toast(txt, "✓ 已复制")
+        except Exception:
+            pass
+
+    def _on_right_click(event):
+        menu = tk.Menu(txt, tearoff=0)
+        sel = ""
+        try:
+            sel = txt.get("sel.first", "sel.last")
+        except tk.TclError:
+            sel = ""
+
+        if sel:
+            menu.add_command(
+                label=f"📋 复制选中内容 ({len(sel)}字)",
+                command=lambda: _copy_text(sel),
+            )
+        menu.add_command(
+            label="📄 复制全部内容",
+            command=lambda: _copy_text(txt.get("1.0", "end-1c")),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="🔍 全选 (Ctrl+A)",
+            command=_select_all,
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    txt.bind("<Control-a>", _select_all, add="+")
+    txt.bind("<Control-A>", _select_all, add="+")
+    txt.bind("<Button-3>", _on_right_click, add="+")
+    txt.bind("<Button-2>", _on_right_click, add="+")

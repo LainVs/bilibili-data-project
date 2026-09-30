@@ -654,4 +654,7 @@ net start MySQL80-E 2>&1 | Out-Host
             except Exception:
                 pass
 
-        self.after(0, upd)
+        try:
+            self.after(0, upd)
+        except Exception:
+            pass
