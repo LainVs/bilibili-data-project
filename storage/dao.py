@@ -2097,15 +2097,6 @@ def find_video_by_bvid(bvid: str) -> dict | None:
     except Exception:
         pass
 
-    # 4. 数学双射解码 aid 兜底（即使尚未入库 meta_video 也能精准拿到 aid 检索发言）
-    try:
-        from crawler.pipelines.clean import bvid_to_aid
-        aid = bvid_to_aid(bvid)
-        if aid:
-            return {"aid": aid, "bvid": bvid, "cid": 0, "title": bvid, "owner_uid": 0, "pubdate": 0}
-    except Exception:
-        pass
-
     return None
 
 

@@ -155,6 +155,9 @@ class CommentFetcher:
                 page_error = f"oid={oid} 第{next_seq}页拉取失败（已得{len(results)}条）"
                 stop_reason = "error"
                 break
+            if data is None or not isinstance(data, dict):
+                stop_reason = "end"
+                break
             replies_data = data.get("replies") or []
 
             newest_under_min = False
