@@ -93,7 +93,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_report = sub.add_parser("report", help="一键生成独立单文件 HTML 网页研报")
     p_report.add_argument("--bvid", required=True, help="视频 BV 号")
     p_report.add_argument("--output", default="", help="导出 HTML 文件路径（默认 logs/report_<BVID>.html）")
-    p_report.add_argument("--limit", type=int, default=5000, help="采样分析上限（默认 5000）")
+    p_report.add_argument("--limit", type=int, default=0, help="分析条数上限(默认 0=100%全量分析)")
     p_report.add_argument("--no-trends", action="store_true", help="不包含走势板块")
     p_report.add_argument("--no-sentiment", action="store_true", help="不包含情感板块")
     p_report.add_argument("--no-terms", action="store_true", help="不包含词频板块")

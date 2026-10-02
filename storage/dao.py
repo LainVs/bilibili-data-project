@@ -2023,9 +2023,10 @@ def _attach_counts(videos: list[dict]) -> list[dict]:
     return videos
 
 
-def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> list[dict]:
-    """按对象(aid)查已入库评论（含 IP 属地），按 rpid 倒序（零排序耗时，秒级响应）。"""
+def query_comments_by_video(aid: int, ref_type: int = 1, limit: int | None = 500) -> list[dict]:
+    """按对象(aid)查已入库评论（含 IP 属地），按 rpid 倒序。limit<=0 或 None 为全量。"""
     rows: list[dict] = []
+    lim_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
     # 1. 优先查 E（归档主库）
     try:
         conn = _r()
@@ -2035,9 +2036,9 @@ def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> li
                     "SELECT rpid, video_aid, ref_type, parent, uid, content, like_num, "
                     "       ip_location, ctime "
                     "FROM raw_comments FORCE INDEX (idx_aid_type) "
-                    "WHERE video_aid = %s AND ref_type = %s "
-                    "ORDER BY rpid DESC LIMIT %s",
-                    (aid, ref_type, limit),
+                    f"WHERE video_aid = %s AND ref_type = %s "
+                    f"ORDER BY rpid DESC {lim_clause}",
+                    (aid, ref_type),
                 )
                 rows = list(cur.fetchall())
         finally:
@@ -2045,8 +2046,9 @@ def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> li
     except Exception as exc:
         logger.warning("query_comments_by_video 查E失败: %s", exc)
 
-    # 2. 若未满额，补充查 D（写缓冲）
-    if len(rows) < limit:
+    # 2. 若未满额（或全量模式），补充查 D（写缓冲）
+    if limit is None or limit <= 0 or len(rows) < limit:
+        sub_lim = f"LIMIT {limit - len(rows)}" if limit and limit > 0 else ""
         try:
             conn = _w()
             try:
@@ -2055,9 +2057,9 @@ def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> li
                         "SELECT rpid, video_aid, ref_type, parent, uid, content, like_num, "
                         "       ip_location, ctime "
                         "FROM raw_comments "
-                        "WHERE video_aid = %s AND ref_type = %s "
-                        "ORDER BY rpid DESC LIMIT %s",
-                        (aid, ref_type, limit - len(rows)),
+                        f"WHERE video_aid = %s AND ref_type = %s "
+                        f"ORDER BY rpid DESC {sub_lim}",
+                        (aid, ref_type),
                     )
                     rows.extend(cur.fetchall())
             finally:
@@ -2068,9 +2070,10 @@ def query_comments_by_video(aid: int, ref_type: int = 1, limit: int = 500) -> li
     return rows
 
 
-def query_danmaku_by_video(aid: int, limit: int = 500) -> list[dict]:
-    """按视频查已入库弹幕（附发送者信息），按 id 倒序。"""
+def query_danmaku_by_video(aid: int, limit: int | None = 500) -> list[dict]:
+    """按视频查已入库弹幕（附发送者信息），按 id 倒序。limit<=0 或 None 为全量。"""
     rows: list[dict] = []
+    lim_clause = f"LIMIT {int(limit)}" if limit and limit > 0 else ""
     try:
         conn = _r()
         try:
@@ -2079,8 +2082,8 @@ def query_danmaku_by_video(aid: int, limit: int = 500) -> list[dict]:
                     "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
                     "       d.ctime "
                     "FROM raw_danmaku d WHERE d.video_aid = %s "
-                    "ORDER BY d.id DESC LIMIT %s",
-                    (aid, limit),
+                    f"ORDER BY d.id DESC {lim_clause}",
+                    (aid,),
                 )
                 rows = list(cur.fetchall())
         finally:
@@ -2088,7 +2091,8 @@ def query_danmaku_by_video(aid: int, limit: int = 500) -> list[dict]:
     except Exception:
         pass
 
-    if len(rows) < limit:
+    if limit is None or limit <= 0 or len(rows) < limit:
+        sub_lim = f"LIMIT {limit - len(rows)}" if limit and limit > 0 else ""
         try:
             conn = _w()
             try:
@@ -2097,8 +2101,8 @@ def query_danmaku_by_video(aid: int, limit: int = 500) -> list[dict]:
                         "SELECT d.id, d.video_aid, d.uid, d.mid_hash, d.content, d.progress, "
                         "       d.ctime "
                         "FROM raw_danmaku d WHERE d.video_aid = %s "
-                        "ORDER BY d.id DESC LIMIT %s",
-                        (aid, limit - len(rows)),
+                        f"ORDER BY d.id DESC {sub_lim}",
+                        (aid,),
                     )
                     rows.extend(cur.fetchall())
             finally:

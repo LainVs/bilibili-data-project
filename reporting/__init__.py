@@ -47,14 +47,14 @@ class ReportData:
 
 def collect_report_data(
     bvid: str,
-    limit: int = 5000,
+    limit: int = 0,
     sections: ReportSections | None = None,
     auto_sync: bool = False,
 ) -> ReportData:
     """从数据库采集并加工研报所需全部数据（按勾选版块选择性计算）。
 
     auto_sync: 若为 True，生成前自动联网增量同步该视频官方最新指标与新评论/弹幕。
-    limit: 深度分析样本上限。若传 0 则为全量分析。
+    limit: 深度分析样本上限。若传 0 则为 100% 全量分析。
     """
     sections = sections or ReportSections()
 
@@ -82,7 +82,7 @@ def collect_report_data(
 
     comments: list[dict[str, Any]] = []
     danmaku: list[dict[str, Any]] = []
-    fetch_limit = 500000 if limit <= 0 else max(100, int(limit))
+    fetch_limit = 0 if limit <= 0 else max(100, int(limit))
 
     if aid:
         try:
@@ -790,7 +790,7 @@ def generate_report(
     bvid: str,
     output_path: str,
     *,
-    limit: int = 5000,
+    limit: int = 0,
     sections: ReportSections | None = None,
     auto_sync: bool = False,
 ) -> str:

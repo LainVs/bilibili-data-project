@@ -57,19 +57,26 @@ def _tokenize_fallback(text: str) -> list[str]:
     return toks
 
 
+try:
+    import jieba  # type: ignore
+    _HAS_JIEBA = True
+except Exception:
+    _HAS_JIEBA = False
+
+
 def tokenize(text: str) -> list[str]:
     """分词：有 jieba 用 jieba 精确模式，否则回退 2-gram。"""
     text = clean_text(text)
     if not text:
         return []
-    try:
-        import jieba  # type: ignore
-
-        toks = [t.strip().lower() for t in jieba.cut(text, cut_all=False)]
-        return [t for t in toks if t and t not in STOPWORDS and len(t) >= 2
-                or (len(t) == 1 and _CJK_RE.match(t) and t not in STOPWORDS)]
-    except Exception:
-        return _tokenize_fallback(text)
+    if _HAS_JIEBA:
+        try:
+            toks = [t.strip().lower() for t in jieba.cut(text, cut_all=False)]
+            return [t for t in toks if t and t not in STOPWORDS and len(t) >= 2
+                    or (len(t) == 1 and _CJK_RE.match(t) and t not in STOPWORDS)]
+        except Exception:
+            pass
+    return _tokenize_fallback(text)
 
 
 def top_terms(texts: list[str], top: int = 20) -> list[dict]:

@@ -84,9 +84,9 @@ class ReportPanel(ttk.Frame):
         ent_bvid = ttk.Entry(r1, textvariable=self.var_bvid, width=20)
         ent_bvid.pack(side="left", padx=(6, 12))
 
-        ttk.Label(r1, text="采样上限:", style="Secondary.TLabel").pack(side="left")
-        self.var_limit = tk.StringVar(value="5000")
-        ttk.Spinbox(r1, from_=500, to=50000, textvariable=self.var_limit, width=7).pack(side="left", padx=(4, 12))
+        ttk.Label(r1, text="分析上限(0=全量):", style="Secondary.TLabel").pack(side="left")
+        self.var_limit = tk.StringVar(value="0")
+        ttk.Spinbox(r1, from_=0, to=1000000, textvariable=self.var_limit, width=7).pack(side="left", padx=(4, 12))
 
         ttk.Label(r1, text="输出文件名:", style="Secondary.TLabel").pack(side="left")
         self.var_out = tk.StringVar(value="bilibili_report.html")
@@ -210,9 +210,11 @@ class ReportPanel(ttk.Frame):
             return
 
         try:
-            limit = max(100, int(self.var_limit.get() or 5000))
+            limit = int(self.var_limit.get() or 0)
+            if limit < 0:
+                limit = 0
         except ValueError:
-            limit = 5000
+            limit = 0
 
         out_name = self.var_out.get().strip() or f"report_{bvid}.html"
         if not out_name.endswith(".html"):
