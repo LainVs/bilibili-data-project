@@ -803,19 +803,94 @@ def upsert_posts(items: Iterable[dict]) -> int:
 
 
 def get_max_comment_ctime(video_aid: int, ref_type: int = 1) -> int:
-    """返回某对象已采集评论的最新时间戳（读D，新写入未归档）。"""
-    conn = _w()
+    """返回某对象已采集评论的最新时间戳（优先查D，D为0查E）。"""
+    max_ts = 0
+    # 1. 查 D
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(UNIX_TIMESTAMP(ctime)) AS ts FROM raw_comments "
-                "WHERE video_aid = %s AND ref_type = %s",
-                (video_aid, ref_type),
-            )
-            row = cur.fetchone()
-            return int(row["ts"] or 0) if row else 0
-    finally:
-        conn.close()
+        conn = _w()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(UNIX_TIMESTAMP(ctime)) AS ts FROM raw_comments "
+                    "WHERE video_aid = %s AND ref_type = %s",
+                    (video_aid, ref_type),
+                )
+                row = cur.fetchone()
+                max_ts = max(max_ts, int(row["ts"] or 0) if row else 0)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # 2. 查 E
+    try:
+        conn = _r()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(UNIX_TIMESTAMP(ctime)) AS ts FROM raw_comments "
+                    "WHERE video_aid = %s AND ref_type = %s",
+                    (video_aid, ref_type),
+                )
+                row = cur.fetchone()
+                max_ts = max(max_ts, int(row["ts"] or 0) if row else 0)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return max_ts
+
+
+def count_video_comments_and_danmaku(video_aid: int) -> dict[str, int]:
+    """精确统计库内某视频的评论与弹幕全量总数（跨 D 缓冲与 E 归档，带 FORCE INDEX 秒级返回）。"""
+    tot_c, tot_d = 0, 0
+    # 查 E
+    try:
+        conn = _r()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM raw_comments FORCE INDEX (idx_aid_type) "
+                    "WHERE video_aid = %s",
+                    (video_aid,),
+                )
+                r = cur.fetchone()
+                tot_c += int(r["n"] or 0) if r else 0
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM raw_danmaku WHERE video_aid = %s",
+                    (video_aid,),
+                )
+                r = cur.fetchone()
+                tot_d += int(r["n"] or 0) if r else 0
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # 查 D
+    try:
+        conn = _w()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM raw_comments WHERE video_aid = %s",
+                    (video_aid,),
+                )
+                r = cur.fetchone()
+                tot_c += int(r["n"] or 0) if r else 0
+                cur.execute(
+                    "SELECT COUNT(*) AS n FROM raw_danmaku WHERE video_aid = %s",
+                    (video_aid,),
+                )
+                r = cur.fetchone()
+                tot_d += int(r["n"] or 0) if r else 0
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return {"comments": tot_c, "danmaku": tot_d}
 
 
 def upsert_users(items: Iterable[dict], *, conn=None) -> int:

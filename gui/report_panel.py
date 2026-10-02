@@ -28,6 +28,7 @@ class ReportPanel(ttk.Frame):
         return {
             "bvid": self.var_bvid.get(),
             "limit": self.var_limit.get(),
+            "auto_sync": self.var_auto_sync.get(),
             "sec_overview": self.var_sec_overview.get(),
             "sec_trends": self.var_sec_trends.get(),
             "sec_sentiment": self.var_sec_sentiment.get(),
@@ -43,6 +44,8 @@ class ReportPanel(ttk.Frame):
             self.var_bvid.set(str(state["bvid"]))
         if "limit" in state:
             self.var_limit.set(str(state["limit"]))
+        if "auto_sync" in state:
+            self.var_auto_sync.set(bool(state["auto_sync"]))
         for var_name in (
             "sec_overview", "sec_trends", "sec_sentiment",
             "sec_terms", "sec_water_army", "sec_top_comments"
@@ -89,6 +92,15 @@ class ReportPanel(ttk.Frame):
         self.var_out = tk.StringVar(value="bilibili_report.html")
         ttk.Entry(r1, textvariable=self.var_out, width=24).pack(side="left", padx=(4, 6))
         ttk.Button(r1, text="浏览...", command=self._browse_output).pack(side="left")
+
+        r2 = tk.Frame(t_body, bg=C.BG_CARD)
+        r2.pack(fill="x", pady=(6, 2))
+        self.var_auto_sync = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            r2,
+            text="生成前自动联网增量补采最新数据 (若网络连通，自动拉取最新发布评论/弹幕与官方播放点赞指标)",
+            variable=self.var_auto_sync,
+        ).pack(side="left")
 
         # ── 2. 选择性实现版块勾选卡片 ──
         sec_card = ClaudeCard(
@@ -217,17 +229,20 @@ class ReportPanel(ttk.Frame):
             top_comments=self.var_sec_top_comments.get(),
         )
 
+        auto_sync = self.var_auto_sync.get()
+        sync_hint = "（已开启生成前自动增量补采最新数据与官方指标）" if auto_sync else "（纯离线本地数据模式）"
+
         self._is_generating = True
         self.btn_gen.configure(state="disabled", text="正在装配生成...")
         self.btn_open.configure(state="disabled")
         self.btn_folder.configure(state="disabled")
         self.badge_status.set_status("生成中", status="info")
-        self.lbl_info.configure(text=f"正在提取 {bvid} 对应的数据并执行算法分析...")
+        self.lbl_info.configure(text=f"正在处理 {bvid} {sync_hint}...")
         self.prog.start(10)
 
         def worker():
             try:
-                out_path = generate_report(bvid, out_name, limit=limit, sections=sections)
+                out_path = generate_report(bvid, out_name, limit=limit, sections=sections, auto_sync=auto_sync)
                 self.after(0, lambda: self._on_generate_success(out_path))
             except Exception as exc:
                 logger.exception("生成研报异常: %s", exc)

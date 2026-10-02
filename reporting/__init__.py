@@ -49,37 +49,65 @@ def collect_report_data(
     bvid: str,
     limit: int = 5000,
     sections: ReportSections | None = None,
+    auto_sync: bool = False,
 ) -> ReportData:
-    """从数据库采集并加工研报所需全部数据（按勾选版块选择性计算）。"""
+    """从数据库采集并加工研报所需全部数据（按勾选版块选择性计算）。
+
+    auto_sync: 若为 True，生成前自动联网增量同步该视频官方最新指标与新评论/弹幕。
+    limit: 深度分析样本上限。若传 0 则为全量分析。
+    """
     sections = sections or ReportSections()
+
+    # 0. 可选前置：自动增量补采最新数据
     meta = dao.find_video_by_bvid(bvid) or {}
+    if auto_sync and bvid.strip():
+        try:
+            from crawler.api.client import ApiClient
+            from crawler.tasks.full import crawl_one_video, fetch_video_meta
+            client = ApiClient()
+            try:
+                latest_meta = fetch_video_meta(client, bvid.strip())
+                if latest_meta and latest_meta.get("aid"):
+                    dao.upsert_video([latest_meta])
+                    meta = latest_meta
+                crawl_one_video(client, bvid.strip(), incremental=True, with_comments=True, with_danmaku=True)
+            finally:
+                client.close()
+        except Exception as exc:
+            logger.warning("研报前自动增量补采跳过/异常: %s", exc)
+
+    if not meta:
+        meta = dao.find_video_by_bvid(bvid) or {}
     aid = int(meta.get("aid", 0) or 0)
 
     comments: list[dict[str, Any]] = []
     danmaku: list[dict[str, Any]] = []
+    fetch_limit = 500000 if limit <= 0 else max(100, int(limit))
 
     if aid:
         try:
-            comments = dao.query_comments_by_video(aid, limit=limit) or []
+            comments = dao.query_comments_by_video(aid, limit=fetch_limit) or []
         except Exception as exc:
             logger.warning("研报获取评论失败: %s", exc)
         try:
-            danmaku = dao.query_danmaku_by_video(aid, limit=limit) or []
+            danmaku = dao.query_danmaku_by_video(aid, limit=fetch_limit) or []
         except Exception as exc:
             logger.warning("研报获取弹幕失败: %s", exc)
     else:
-        # 若未按 BV 找到，尝试按全库采样
+        # 若未按 BV 找到，尝试按全库采样兜底
         try:
             from analysis.stats_service import sample_texts_for_insight
-            comments = sample_texts_for_insight(limit=min(limit, 3000))
+            comments = sample_texts_for_insight(limit=min(fetch_limit, 5000))
         except Exception:
             pass
 
     data = ReportData(meta=meta, comments=comments, danmaku=danmaku)
 
-    # 1. 基础汇总指标
-    total_comments = len(comments)
-    total_danmaku = len(danmaku)
+    # 1. 基础汇总指标（区分真实全库总数、官方实时总数、本次分析采样量）
+    db_counts = dao.count_video_comments_and_danmaku(aid) if aid else {}
+    db_total_comments = db_counts.get("comments", 0) or len(comments)
+    db_total_danmaku = db_counts.get("danmaku", 0) or len(danmaku)
+
     total_likes = sum(int(c.get("like_num", 0) or 0) for c in comments)
     unique_users = len({c.get("uid") for c in comments if c.get("uid")} |
                        {d.get("uid") for d in danmaku if d.get("uid") and d.get("uid") > 0})
@@ -90,8 +118,14 @@ def collect_report_data(
         "aid": aid,
         "owner": meta.get("owner_name") or "未知UP主",
         "pubdate": datetime.fromtimestamp(meta.get("pubdate", 0)).strftime("%Y-%m-%d %H:%M") if meta.get("pubdate") else "未知",
-        "total_comments": total_comments,
-        "total_danmaku": total_danmaku,
+        "db_total_comments": db_total_comments,
+        "db_total_danmaku": db_total_danmaku,
+        "stat_reply": int(meta.get("stat_reply", 0) or 0),
+        "stat_danmaku": int(meta.get("stat_danmaku", 0) or 0),
+        "stat_view": int(meta.get("stat_view", 0) or 0),
+        "stat_like": int(meta.get("stat_like", 0) or 0),
+        "sample_comments_analyzed": len(comments),
+        "sample_danmaku_analyzed": len(danmaku),
         "total_likes": total_likes,
         "unique_users": unique_users,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -312,29 +346,59 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
 
     # 1. 核心指标卡片
     if sections.overview:
+        db_c = st.get("db_total_comments", 0)
+        off_c = st.get("stat_reply", 0)
+        sample_c = st.get("sample_comments_analyzed", 0)
+
+        db_d = st.get("db_total_danmaku", 0)
+        off_d = st.get("stat_danmaku", 0)
+        sample_d = st.get("sample_danmaku_analyzed", 0)
+
+        off_v = st.get("stat_view", 0)
+        off_l = st.get("stat_like", 0)
+
+        disp_c = off_c if off_c > 0 else db_c
+        if off_c > 0:
+            rate = f"收录率 {min(100.0, db_c / off_c * 100):.1f}%" if off_c > 0 else ""
+            sub_c = f"库内已收录 {db_c:,} 条 · 分析样本 {sample_c:,} 条 ({rate})"
+        else:
+            sub_c = f"全库总计 {db_c:,} 条 · 本次深度分析样本 {sample_c:,} 条"
+
+        disp_d = off_d if off_d > 0 else db_d
+        sub_d = f"库内已收录 {db_d:,} 条 · 样本 {sample_d:,} 条" if off_d > 0 else f"分析样本 {sample_d:,} 条"
+
+        if off_v > 0:
+            label_3 = "全网播放热度"
+            disp_3 = f"{off_v:,}"
+            sub_3 = f"官方点赞 {off_l:,} 次 · 活跃观众 {st.get('unique_users', 0):,} 人"
+        else:
+            label_3 = "独立参与用户"
+            disp_3 = f"{st.get('unique_users', 0):,}"
+            sub_3 = "真实去重发言用户数"
+
         content_blocks.append(f"""
         <section class="section">
           <h2 class="section-title">01 / 核心指标概览</h2>
           <div class="kpi-grid">
             <div class="kpi-card">
-              <div class="kpi-label">已收录评论</div>
-              <div class="kpi-val">{st.get("total_comments", 0):,}</div>
-              <div class="kpi-sub">包含一二级回复</div>
+              <div class="kpi-label">全网评论总量</div>
+              <div class="kpi-val">{disp_c:,}</div>
+              <div class="kpi-sub">{sub_c}</div>
             </div>
             <div class="kpi-card">
-              <div class="kpi-label">已收录弹幕</div>
-              <div class="kpi-val">{st.get("total_danmaku", 0):,}</div>
-              <div class="kpi-sub">分段全量历史</div>
+              <div class="kpi-label">全网弹幕总量</div>
+              <div class="kpi-val">{disp_d:,}</div>
+              <div class="kpi-sub">{sub_d}</div>
             </div>
             <div class="kpi-card">
-              <div class="kpi-label">独立参与用户</div>
-              <div class="kpi-val">{st.get("unique_users", 0):,}</div>
-              <div class="kpi-sub">真实去重 UID 覆盖</div>
+              <div class="kpi-label">{label_3}</div>
+              <div class="kpi-val">{disp_3}</div>
+              <div class="kpi-sub">{sub_3}</div>
             </div>
             <div class="kpi-card">
-              <div class="kpi-label">累计互动点赞</div>
+              <div class="kpi-label">累计前台获赞</div>
               <div class="kpi-val">{st.get("total_likes", 0):,}</div>
-              <div class="kpi-sub">前台点赞总和</div>
+              <div class="kpi-sub">分析样本前台点赞总和</div>
             </div>
           </div>
         </section>
@@ -728,10 +792,11 @@ def generate_report(
     *,
     limit: int = 5000,
     sections: ReportSections | None = None,
+    auto_sync: bool = False,
 ) -> str:
     """采集并渲染单文件 HTML 研报至指定文件路径。"""
     sections = sections or ReportSections()
-    data = collect_report_data(bvid, limit=limit, sections=sections)
+    data = collect_report_data(bvid, limit=limit, sections=sections, auto_sync=auto_sync)
     html_content = build_html_report(data, sections=sections)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)

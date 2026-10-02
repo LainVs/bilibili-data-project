@@ -9,6 +9,7 @@ def parse_info(data: dict) -> dict:
         return {}
     first = pages[0]
     owner = data.get("owner") or {}
+    stat = data.get("stat") or {}
     return {
         "aid": data.get("aid", 0),
         "bvid": data.get("bvid", ""),
@@ -18,4 +19,8 @@ def parse_info(data: dict) -> dict:
         "owner_name": owner.get("name", ""),
         "pubdate": data.get("pubdate", 0),
         "part": first.get("page", 1),
+        "stat_reply": int(stat.get("reply", 0) or 0),
+        "stat_danmaku": int(stat.get("danmaku", 0) or 0),
+        "stat_view": int(stat.get("view", 0) or 0),
+        "stat_like": int(stat.get("like", 0) or 0),
     }

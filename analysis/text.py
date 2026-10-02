@@ -135,15 +135,31 @@ def _coerce_dt(v) -> _dt.datetime | None:
 
 
 def daily_series(rows: list[dict], time_key: str = "ctime",
-                 days: int = 30) -> list[dict]:
-    """按日计数序列（近 N 天）：返回 [{day, cnt}]，缺失日期补 0。"""
+                 days: int = 30, anchor: _dt.date | None = None) -> list[dict]:
+    """按日计数序列（近 N 天）：返回 [{day, cnt}]，缺失日期补 0。
+
+    自适应时间锚点：
+    若 rows 中最新发言日期距今超过 3 天（老视频或历史归档数据），自动以最新发言日期作为时间锚点，
+    展现真实的 30 天互动波峰，彻底消除最近几天全为 0 的贴地水平线。
+    """
     days = max(1, int(days or 30))
-    today = _dt.date.today()
-    base = {str(today - _dt.timedelta(days=i)): 0 for i in range(days - 1, -1, -1)}
+    valid_dts = []
     for r in rows or []:
         dt = _coerce_dt((r or {}).get(time_key))
-        if not dt:
-            continue
+        if dt:
+            valid_dts.append(dt)
+
+    today = _dt.date.today()
+    if anchor is not None:
+        target_anchor = anchor
+    elif valid_dts:
+        max_d = max(d.date() for d in valid_dts)
+        target_anchor = today if (today - max_d).days <= 3 else max_d
+    else:
+        target_anchor = today
+
+    base = {str(target_anchor - _dt.timedelta(days=i)): 0 for i in range(days - 1, -1, -1)}
+    for dt in valid_dts:
         key = str(dt.date())
         if key in base:
             base[key] += 1

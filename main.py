@@ -99,6 +99,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_report.add_argument("--no-terms", action="store_true", help="不包含词频板块")
     p_report.add_argument("--no-detect", action="store_true", help="不包含水军检测板块")
     p_report.add_argument("--no-comments", action="store_true", help="不包含精选神评板块")
+    p_report.add_argument("--sync", dest="auto_sync", action="store_true", default=True, help="生成前自动增量补采最新数据与官方指标（默认开启）")
+    p_report.add_argument("--no-sync", dest="auto_sync", action="store_false", help="仅基于本地已有数据离线生成，不联网补采")
     return parser.parse_args(argv)
 
 
@@ -388,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
             top_comments=not args.no_comments,
         )
         out = args.output.strip() or f"logs/report_{args.bvid}.html"
-        path = generate_report(args.bvid, out, limit=args.limit, sections=sec)
+        path = generate_report(args.bvid, out, limit=args.limit, sections=sec, auto_sync=args.auto_sync)
         print(f"[OK] 研报已成功生成: {path}")
         return 0
 
