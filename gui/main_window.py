@@ -23,6 +23,7 @@ PAGES: list[tuple[str, str, str]] = [
     ("🌐", "广泛采集", "gui.broad_panel:BroadPanel"),
     ("📊", "统计洞察", "gui.stats_panel:StatsPanel"),
     ("🔍", "全局搜索", "gui.search_panel:SearchPanel"),
+    ("📄", "研报生成", "gui.report_panel:ReportPanel"),
 ]
 
 

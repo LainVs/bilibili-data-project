@@ -89,6 +89,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_detect.add_argument("--repeat", type=float, default=0.5, help="复读率阈值（默认0.5）")
     p_detect.add_argument("--burst", type=int, default=8, help="10分钟爆发条数阈值（默认8）")
     p_detect.add_argument("--export", default="", help="导出CSV路径")
+
+    p_report = sub.add_parser("report", help="一键生成独立单文件 HTML 网页研报")
+    p_report.add_argument("--bvid", required=True, help="视频 BV 号")
+    p_report.add_argument("--output", default="", help="导出 HTML 文件路径（默认 logs/report_<BVID>.html）")
+    p_report.add_argument("--limit", type=int, default=5000, help="采样分析上限（默认 5000）")
+    p_report.add_argument("--no-trends", action="store_true", help="不包含走势板块")
+    p_report.add_argument("--no-sentiment", action="store_true", help="不包含情感板块")
+    p_report.add_argument("--no-terms", action="store_true", help="不包含词频板块")
+    p_report.add_argument("--no-detect", action="store_true", help="不包含水军检测板块")
+    p_report.add_argument("--no-comments", action="store_true", help="不包含精选神评板块")
     return parser.parse_args(argv)
 
 
@@ -364,6 +374,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.export:
             _svc.export_detect_csv(res.get("results") or [], args.export)
             print(f"已导出：{args.export}")
+        return 0
+
+    if args.command == "report":
+        from reporting import ReportSections, generate_report
+
+        sec = ReportSections(
+            overview=True,
+            trends=not args.no_trends,
+            sentiment=not args.no_sentiment,
+            terms=not args.no_terms,
+            water_army=not args.no_detect,
+            top_comments=not args.no_comments,
+        )
+        out = args.output.strip() or f"logs/report_{args.bvid}.html"
+        path = generate_report(args.bvid, out, limit=args.limit, sections=sec)
+        print(f"[OK] 研报已成功生成: {path}")
         return 0
 
     logger.error("未知命令: %s", args.command)

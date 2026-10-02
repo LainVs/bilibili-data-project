@@ -37,6 +37,7 @@ python main.py serve
 - `python main.py doctor` 系统全链路环境与健康体检（DB、Cookie、磁盘、跑分）
 - `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
 - `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集打分，GUI「统计洞察」面板第 7 页签同步可用）
+- `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持选择性按需导出）
 - `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV/JSONL)
 - `python main.py crawl --comments-only BVID` 只采评论
 - `python main.py crawl --bvid-file list.txt` 批量采集
@@ -58,6 +59,7 @@ crawler/          # 采集层(API封装/清洗管道/任务编排/限速风控)
 storage/          # MySQL 双库管理(D写缓冲/E归档小仓库/DAO/线程复用)
 crc32_crack/      # mid_hash -> UID 极速逆向破解(MITM算法)
 etl/              # ETL清洗规范化、维度聚合与多格式导出(CSV/JSONL)
+reporting/        # 网页研报生成引擎(零依赖单文件HTML离线研报/SVG图表)
 analysis/         # 文本分析与统计服务层(高频词/情感/时段)
 visualization/    # 数据图表生成(matplotlib折线/柱状图)
 gui/              # 桌面客户端(Obsidian单面板风格)
