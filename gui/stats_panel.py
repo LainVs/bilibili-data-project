@@ -283,20 +283,31 @@ class StatsPanel(ttk.Frame):
             return
         path = filedialog.asksaveasfilename(
             title=f"导出{title}",
-            defaultextension=".csv",
-            filetypes=[("CSV 文件", "*.csv")],
-            initialfile=f"{title}.csv",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("CSV 文件", "*.csv")],
+            initialfile=f"{title}.xlsx",
         )
         if not path:
             return
-        import csv
         headers = [c[1] for c in cols]
+        keys = [c[0] for c in cols]
+        mapping = [(k, h) for k, h in zip(keys, headers)]
+        rows = []
+        for iid in tree.get_children():
+            vals = list(tree.item(iid, "values") or ())
+            rows.append({k: vals[i] if i < len(vals) else "" for i, k in enumerate(keys)})
+
         try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f)
-                w.writerow(headers)
-                for iid in tree.get_children():
-                    w.writerow(tree.item(iid, "values"))
+            if path.endswith(".xlsx"):
+                import etl
+                etl.export_to_styled_xlsx({title: (mapping, rows)}, path)
+            else:
+                import csv
+                with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                    w = csv.writer(f)
+                    w.writerow(headers)
+                    for r in rows:
+                        w.writerow([r.get(k, "") for k in keys])
             messagebox.showinfo("导出完成", f"已成功导出 {len(tree.get_children())} 条记录至:\n{path}")
         except Exception as exc:
             messagebox.showerror("导出失败", f"写入文件失败: {exc}")
@@ -650,15 +661,33 @@ class StatsPanel(ttk.Frame):
         if not getattr(self, "_detect_results", None):
             messagebox.showinfo("导出", "暂无检测结果，先点「开始检测」。")
             return
-        path = filedialog.asksaveasfilename(title="导出水军检测CSV",
-                                            defaultextension=".csv",
-                                            filetypes=[("CSV", "*.csv")],
-                                            initialfile="water_army.csv")
+        path = filedialog.asksaveasfilename(
+            title="导出水军检测结果",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("CSV 文件", "*.csv")],
+            initialfile="water_army.xlsx",
+        )
         if not path:
             return
         try:
-            from analysis import stats_service as _svc
-            _svc.export_detect_csv(self._detect_results, path)
+            if path.endswith(".xlsx"):
+                import etl
+                cols = [
+                    ("uid", "UID"), ("uname", "昵称"), ("total", "发言数"),
+                    ("repeat_rate", "复读率"), ("top_text", "高频文案"),
+                    ("top_text_count", "复读次数"), ("burst_max", "10分钟爆发峰值"),
+                    ("ip_top", "Top属地"), ("ip_ratio", "属地占比"),
+                    ("score", "评分"), ("level", "定级"), ("hits_str", "命中信号"),
+                ]
+                rows = []
+                for r in self._detect_results:
+                    item = dict(r)
+                    item["hits_str"] = "+".join(r.get("hits") or []) or "-"
+                    rows.append(item)
+                etl.export_to_styled_xlsx({"水军检测": (cols, rows)}, path)
+            else:
+                from analysis import stats_service as _svc
+                _svc.export_detect_csv(self._detect_results, path)
             messagebox.showinfo("导出", f"已导出：{path}")
         except Exception as exc:
             messagebox.showerror("导出", f"导出失败：{exc}")

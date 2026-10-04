@@ -38,7 +38,9 @@ python main.py serve
 - `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
 - `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集打分，GUI「统计洞察」面板第 7 页签同步可用）
 - `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持选择性按需导出）
-- `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV/JSONL)
+- `python main.py export --bvid BV18q4y1V7pM --format sqlite --output bundle.sqlite` 打包视频全量生态数据为独立便携 SQLite 数据库（无视 MySQL 环境，任何机器双击秒开）
+- `python main.py export --bvid BV18q4y1V7pM --format xlsx --output bundle.xlsx` 导出带有 Claude 质感排版、冻结表头与斑马纹的多 Sheet 格式化 Excel
+- `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV / JSONL / XLSX / SQLite)
 - `python main.py crawl --comments-only BVID` 只采评论
 - `python main.py crawl --bvid-file list.txt` 批量采集
 - `python main.py increment` 手动增量

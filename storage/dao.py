@@ -2135,11 +2135,11 @@ def find_video_by_bvid(bvid: str) -> dict | None:
     except Exception:
         pass
 
-    # 2. 查 E
+    # 2. 查 E（若 E 离线直接跳出，绝不遍历盲试所有分仓避免超时）
     try:
-        conn = _r()
+        conn_e = _get_conn("read")
         try:
-            with conn.cursor() as cur:
+            with conn_e.cursor() as cur:
                 cur.execute(
                     "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
                     (bvid,),
@@ -2147,32 +2147,28 @@ def find_video_by_bvid(bvid: str) -> dict | None:
                 r = cur.fetchone()
                 if r:
                     return r
-        finally:
-            conn.close()
-    except Exception:
-        pass
-
-    # 3. 查各分仓
-    try:
-        dbs, _ = _shard_dbs_trusted()
-        for db in dbs:
-            if db == "bilibili_data":
-                continue
-            try:
-                conn = _open_conn("read", db, 3)
+            # 3. 只有当 E 确认连通时，才查其余历史分仓
+            dbs, _ = _shard_dbs_trusted()
+            for db in dbs:
+                if db == "bilibili_data":
+                    continue
                 try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
-                            (bvid,),
-                        )
-                        r = cur.fetchone()
-                        if r:
-                            return r
-                finally:
-                    conn.close()
-            except Exception:
-                pass
+                    conn_sh = _open_conn("read", db, 2)
+                    try:
+                        with conn_sh.cursor() as cur:
+                            cur.execute(
+                                "SELECT aid, bvid, cid, title, owner_uid, pubdate FROM meta_video WHERE bvid = %s LIMIT 1",
+                                (bvid,),
+                            )
+                            r = cur.fetchone()
+                            if r:
+                                return r
+                    finally:
+                        conn_sh.close()
+                except Exception:
+                    pass
+        finally:
+            conn_e.close()
     except Exception:
         pass
 

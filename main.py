@@ -74,9 +74,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     sub.add_parser("doctor", help="系统全链路健康体检（DB连接/Cookie/磁盘/算法性能）")
 
-    p_export = sub.add_parser("export", help="数据导出 (CSV / JSONL)")
+    p_export = sub.add_parser("export", help="数据导出 (CSV / JSONL / XLSX / SQLite)")
     p_export.add_argument("--type", choices=["comments", "danmaku", "videos", "users"], default="comments", help="导出数据类型")
-    p_export.add_argument("--format", choices=["csv", "jsonl"], default="csv", help="导出格式")
+    p_export.add_argument("--format", choices=["csv", "jsonl", "xlsx", "sqlite"], default="csv", help="导出格式")
     p_export.add_argument("--bvid", default="", help="限定视频 BV")
     p_export.add_argument("--uid", type=int, default=0, help="限定用户 UID")
     p_export.add_argument("--output", required=True, help="导出文件路径")
@@ -344,9 +344,26 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.format == "csv":
             count = etl.export_to_csv(rows, args.output, field_mapping=mapping)
-        else:
+            print(f"[OK] 成功导出 {count} 条记录到 {args.output}")
+        elif args.format == "jsonl":
             count = etl.export_to_jsonl(rows, args.output)
-        print(f"成功导出 {count} 条记录到 {args.output}")
+            print(f"[OK] 成功导出 {count} 条记录到 {args.output}")
+        elif args.format in ("sqlite", "db"):
+            if args.bvid:
+                bundle = etl.export_video_bundle(args.bvid, args.output, format="sqlite", limit=args.limit)
+                print(f"[OK] 成功打包视频完整 SQLite 数据库到 {bundle['path']} (总计 {bundle['total_records']} 条记录, 表明细: {bundle['counts']})")
+            else:
+                table_map = {args.type: rows}
+                counts = etl.export_to_sqlite(table_map, args.output)
+                print(f"[OK] 成功导出 SQLite 数据库到 {args.output} (明细: {counts})")
+        elif args.format in ("xlsx", "excel"):
+            if args.bvid:
+                bundle = etl.export_video_bundle(args.bvid, args.output, format="xlsx", limit=args.limit)
+                print(f"[OK] 成功导出多 Sheet 样式 Excel 到 {bundle['path']} (总计 {bundle['total_records']} 条记录)")
+            else:
+                sheet_data = {t: (mapping, rows)}
+                count = etl.export_to_styled_xlsx(sheet_data, args.output)
+                print(f"[OK] 成功导出样式 Excel 到 {args.output} (共 {count} 条)")
         return 0
 
     if args.command == "detect":

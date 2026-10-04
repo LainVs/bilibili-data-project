@@ -227,30 +227,40 @@ class UserQueryPanel(ttk.Frame):
             return
         path = filedialog.asksaveasfilename(
             title="导出查询结果",
-            defaultextension=".csv",
-            filetypes=[("CSV 文件", "*.csv")],
-            initialfile=f"user_{self.var_uid.get()}_export.csv",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("CSV 文件", "*.csv")],
+            initialfile=f"user_{self.var_uid.get()}_export.xlsx",
         )
         if not path:
             return
-        import csv
+
+        cols = [
+            ("kind", "类型"),
+            ("time_fmt", "时间"),
+            ("content", "内容"),
+            ("ip_location", "属地"),
+            ("like_num", "点赞数"),
+            ("bvid", "BV号"),
+            ("title", "视频标题"),
+            ("progress", "弹幕时间(秒)"),
+        ]
+        export_rows = []
+        for row in self._rows.values():
+            r = dict(row)
+            r["time_fmt"] = fmt_dt(r.get("ctime"))
+            export_rows.append(r)
 
         try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-                writer = csv.writer(fh)
-                writer.writerow(["类型", "时间", "内容", "属地", "点赞数", "BV号", "视频标题", "弹幕时间(秒)"])
-                for row in self._rows.values():
-                    kind = row.get("kind", "")
-                    writer.writerow([
-                        kind,
-                        fmt_dt(row.get("ctime")),
-                        row.get("content", ""),
-                        row.get("ip_location") or "",
-                        row.get("like_num", 0) if kind == "评论" else "",
-                        row.get("bvid", ""),
-                        row.get("title", ""),
-                        row.get("progress", "") if kind == "弹幕" else "",
-                    ])
+            if path.endswith(".xlsx"):
+                import etl
+                etl.export_to_styled_xlsx({"用户发言": (cols, export_rows)}, path)
+            else:
+                import csv
+                with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow([c[1] for c in cols])
+                    for r in export_rows:
+                        writer.writerow([r.get(c[0], "") for c in cols])
             messagebox.showinfo("导出完成", f"已成功导出 {len(self._rows)} 条发言至:\n{path}")
         except Exception as exc:
             messagebox.showerror("导出失败", f"写入失败: {exc}")
@@ -263,19 +273,18 @@ class UserQueryPanel(ttk.Frame):
             return
         path = filedialog.asksaveasfilename(
             title="导出该用户全部发言",
-            defaultextension=".csv",
-            filetypes=[("CSV 文件", "*.csv")],
-            initialfile=f"user_{uid}_all.csv",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 工作簿", "*.xlsx"), ("CSV 文件", "*.csv")],
+            initialfile=f"user_{uid}_all.xlsx",
         )
         if not path:
             return
-        import csv
 
         box = tk.Toplevel(self)
         box.title("导出全部发言")
         box.geometry("420x110")
         box.configure(bg=C.BG_WINDOW)
-        lbl = ttk.Label(box, text="正在读取库内全部发言并生成 CSV...", style="Hint.TLabel")
+        lbl = ttk.Label(box, text="正在读取库内全部发言并生成文件...", style="Hint.TLabel")
         lbl.pack(padx=16, pady=(16, 8), anchor="w")
         prog = ttk.Progressbar(box, mode="indeterminate")
         prog.pack(fill="x", padx=16)
@@ -285,32 +294,52 @@ class UserQueryPanel(ttk.Frame):
             try:
                 comments = dao.query_comments_by_uid(uid, limit=0)
                 danmaku = dao.query_danmaku_by_uid(uid, limit=0)
-                with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-                    writer = csv.writer(fh)
-                    writer.writerow(["类型", "时间", "内容", "属地", "点赞数", "BV号", "视频标题", "弹幕时间(秒)"])
-                    for c in comments:
-                        writer.writerow([
-                            "评论",
-                            fmt_dt(c.get("ctime")),
-                            c.get("content", ""),
-                            c.get("ip_location") or "",
-                            c.get("like_num", 0),
-                            c.get("bvid", ""),
-                            c.get("title", ""),
-                            "",
-                        ])
-                    for d in danmaku:
-                        writer.writerow([
-                            "弹幕",
-                            fmt_dt(d.get("ctime")),
-                            d.get("content", ""),
-                            "",
-                            "",
-                            d.get("bvid", ""),
-                            d.get("title", ""),
-                            d.get("progress", ""),
-                        ])
-                n = len(comments) + len(danmaku)
+                cols = [
+                    ("kind", "类型"),
+                    ("time_fmt", "时间"),
+                    ("content", "内容"),
+                    ("ip_location", "属地"),
+                    ("like_num", "点赞数"),
+                    ("bvid", "BV号"),
+                    ("title", "视频标题"),
+                    ("progress", "弹幕时间(秒)"),
+                ]
+                all_rows = []
+                for c in comments:
+                    all_rows.append({
+                        "kind": "评论",
+                        "time_fmt": fmt_dt(c.get("ctime")),
+                        "content": c.get("content", ""),
+                        "ip_location": c.get("ip_location") or "",
+                        "like_num": c.get("like_num", 0),
+                        "bvid": c.get("bvid", ""),
+                        "title": c.get("title", ""),
+                        "progress": "",
+                    })
+                for d in danmaku:
+                    all_rows.append({
+                        "kind": "弹幕",
+                        "time_fmt": fmt_dt(d.get("ctime")),
+                        "content": d.get("content", ""),
+                        "ip_location": "",
+                        "like_num": "",
+                        "bvid": d.get("bvid", ""),
+                        "title": d.get("title", ""),
+                        "progress": d.get("progress", ""),
+                    })
+
+                if path.endswith(".xlsx"):
+                    import etl
+                    etl.export_to_styled_xlsx({"全部发言": (cols, all_rows)}, path)
+                else:
+                    import csv
+                    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                        writer = csv.writer(fh)
+                        writer.writerow([c[1] for c in cols])
+                        for r in all_rows:
+                            writer.writerow([r.get(c[0], "") for c in cols])
+
+                n = len(all_rows)
                 self.after(0, lambda: [box.destroy(), messagebox.showinfo("导出完成", f"已导出该用户全部 {n:,} 条发言至:\n{path}")])
             except Exception as exc:
                 self.after(0, lambda: [box.destroy(), messagebox.showerror("导出失败", str(exc))])

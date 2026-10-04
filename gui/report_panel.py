@@ -162,6 +162,9 @@ class ReportPanel(ttk.Frame):
         self.btn_folder = ttk.Button(ctrl_row, text="打开所在文件夹", command=self._open_folder, state="disabled")
         self.btn_folder.pack(side="left")
 
+        ttk.Button(ctrl_row, text="打包为 SQLite", command=self._export_sqlite).pack(side="left", padx=(14, 4))
+        ttk.Button(ctrl_row, text="打包为 Excel", command=self._export_excel).pack(side="left", padx=4)
+
         self.badge_status = ClaudeBadge(act_card.header_right, text="待命", status="muted")
         self.badge_status.pack(side="right")
 
@@ -294,3 +297,59 @@ class ReportPanel(ttk.Frame):
             os.startfile(folder)  # type: ignore[attr-defined]
         except Exception:
             messagebox.showinfo("路径", folder)
+
+    def _export_sqlite(self) -> None:
+        bvid = self.var_bvid.get().strip()
+        if not bvid:
+            messagebox.showwarning("提示", "请输入要打包导出的视频 BV 号")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出独立 SQLite 数据库",
+            defaultextension=".sqlite",
+            filetypes=[("SQLite 数据库", "*.sqlite"), ("SQLite DB", "*.db")],
+            initialfile=f"{bvid}_bundle.sqlite",
+        )
+        if not path:
+            return
+        self._export_bundle_async(bvid, path, "sqlite")
+
+    def _export_excel(self) -> None:
+        bvid = self.var_bvid.get().strip()
+        if not bvid:
+            messagebox.showwarning("提示", "请输入要打包导出的视频 BV 号")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出多 Sheet 格式化 Excel",
+            defaultextension=".xlsx",
+            filetypes=[("Excel 工作簿", "*.xlsx")],
+            initialfile=f"{bvid}_bundle.xlsx",
+        )
+        if not path:
+            return
+        self._export_bundle_async(bvid, path, "xlsx")
+
+    def _export_bundle_async(self, bvid: str, path: str, fmt: str) -> None:
+        self.prog.start(10)
+        self.lbl_info.configure(text=f"正在打包导出视频 {bvid} 全部数据到 {fmt.upper()}...")
+        self.badge_status.set_status("导出中", status="info")
+
+        def worker():
+            try:
+                import etl
+                res = etl.export_video_bundle(bvid, path, format=fmt, limit=0)
+                self.after(0, lambda: [
+                    self.prog.stop(),
+                    self.badge_status.set_status("导出完成", status="success"),
+                    self.lbl_info.configure(text=f"✓ 已成功打包 {fmt.upper()} 文件: {res['path']}"),
+                    messagebox.showinfo("导出成功", f"已成功打包视频全量数据至:\n{res['path']}\n\n总记录数: {res.get('total_records', 0):,} 条")
+                ])
+            except Exception as exc:
+                logger.exception("打包导出失败: %s", exc)
+                self.after(0, lambda e=str(exc): [
+                    self.prog.stop(),
+                    self.badge_status.set_status("导出失败", status="error"),
+                    self.lbl_info.configure(text=f"导出失败: {e}"),
+                    messagebox.showerror("导出失败", f"打包导出失败: {e}")
+                ])
+
+        threading.Thread(target=worker, daemon=True).start()
