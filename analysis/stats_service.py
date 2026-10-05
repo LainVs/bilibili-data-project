@@ -383,3 +383,37 @@ def export_detect_csv(results: list[dict], path: str) -> str:
                 "+".join(r.get("hits") or []),
             ])
     return path
+
+
+def get_user_ip_trajectory(uid: int) -> dict:
+    """查询指定 UID 的完整属地流转轨迹与瞬移风险判定。"""
+    from storage import dao
+    from analysis.ip_trajectory import analyze_user_ip_trajectory
+
+    comments = dao.query_comments_by_uid(uid, limit=0) or []
+    traj = analyze_user_ip_trajectory(comments)
+    try:
+        user_info = dao.query_user(uid)
+        traj["uname"] = user_info.get("uname", "") if user_info else ""
+    except Exception:
+        traj["uname"] = ""
+    return traj
+
+
+def get_video_ip_trajectories(bvid: str = "", limit: int = 5000, top: int = 50) -> list[dict]:
+    """批量排查指定视频（或最新样本）观众中的 IP 异地瞬移与跨省跳跃账号。"""
+    from analysis.ip_trajectory import batch_detect_ip_trajectories
+
+    rows, _ = fetch_rows_for_detect(bvid=bvid, limit=limit)
+    trajs = batch_detect_ip_trajectories(rows, min_records=2, top=top)
+    try:
+        from storage import dao
+        for t in trajs[:20]:
+            if not t.get("uname") and t.get("uid"):
+                u = dao.query_user(int(t["uid"]))
+                if u and u.get("uname"):
+                    t["uname"] = u["uname"]
+    except Exception:
+        pass
+    return trajs
+

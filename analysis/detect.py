@@ -78,6 +78,7 @@ def score_user(
     min_texts: int = 5,
     repeat_threshold: float = 0.5,
     burst_threshold: int = 8,
+    teleport_count: int = 0,
 ) -> tuple[float, list[str], str]:
     """综合打分（0~100）+ 命中信号 + 定级。"""
     hits: list[str] = []
@@ -91,8 +92,11 @@ def score_user(
     if total >= min_texts and ip_ratio >= 0.8:
         hits.append("同属地聚集")
         score += 20.0 * ip_ratio
+    if teleport_count > 0:
+        hits.append("异地瞬移")
+        score += min(35.0, 20.0 + (teleport_count - 1) * 10.0)
     score = round(min(100.0, score), 1)
-    if score >= 60 or len(hits) >= 2:
+    if score >= 60 or len(hits) >= 2 or teleport_count >= 2:
         level = "high"
     elif score >= 30 or hits:
         level = "suspect"
@@ -129,6 +133,7 @@ def detect_water_army(
             "texts": [],
             "timestamps": [],
             "ips": [],
+            "raw_events": [],
         })
         if not g["uname"]:
             uname = str((r or {}).get("uname") or "")
@@ -141,8 +146,12 @@ def detect_water_army(
         ip = (r or {}).get("ip_location")
         if ip:
             g["ips"].append(str(ip))
+        if ts is not None and ip:
+            g["raw_events"].append({"ctime": (r or {}).get("ctime"), "ip_location": ip})
 
     out: list[dict[str, Any]] = []
+    from analysis.ip_trajectory import analyze_user_ip_trajectory
+
     for uid, g in groups.items():
         texts = [t for t in g["texts"] if t]
         total = len(g["texts"])
@@ -154,11 +163,23 @@ def detect_water_army(
             top_text, top_cnt, repeat_rate = "", 0, 0.0
         burst = burst_max(g["timestamps"], window=burst_window)
         ip_top, ip_ratio = ip_concentration(g["ips"])
+
+        teleport_count = 0
+        jump_count = 0
+        if len(set(g["ips"])) >= 2 and len(g["raw_events"]) >= 2:
+            try:
+                traj = analyze_user_ip_trajectory(g["raw_events"])
+                teleport_count = traj.get("teleport_count", 0)
+                jump_count = traj.get("jump_count", 0)
+            except Exception:
+                pass
+
         score, hits, level = score_user(
             total, repeat_rate, burst, ip_ratio,
             min_texts=min_texts,
             repeat_threshold=repeat_threshold,
             burst_threshold=burst_threshold,
+            teleport_count=teleport_count,
         )
         out.append({
             "uid": uid,
@@ -173,6 +194,8 @@ def detect_water_army(
             "score": score,
             "hits": hits,
             "level": level,
+            "teleport_count": teleport_count,
+            "jump_count": jump_count,
         })
     out.sort(key=lambda x: (x["score"], x["total"]), reverse=True)
     return out[: max(1, top)]

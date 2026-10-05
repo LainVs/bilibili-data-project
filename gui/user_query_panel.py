@@ -20,6 +20,7 @@ class UserQueryPanel(ttk.Frame):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
         self._rows: dict[str, dict] = {}
+        self._traj: dict | None = None
         self._qgen = 0
         self._last_uid = 0
         self._build_ui()
@@ -65,10 +66,12 @@ class UserQueryPanel(ttk.Frame):
         self.btn_query = ttk.Button(bar, text="检索发言", style="Accent.TButton", command=self._query)
         self.btn_query.pack(side="left")
 
-        self.btn_export = ttk.Button(bar, text="导出当前CSV", command=self._export, state="disabled")
+        self.btn_export = ttk.Button(bar, text="导出当前", command=self._export, state="disabled")
         self.btn_export.pack(side="left", padx=(8, 4))
-        self.btn_export_all = ttk.Button(bar, text="导出全部CSV", command=self._export_all, state="disabled")
+        self.btn_export_all = ttk.Button(bar, text="导出全部", command=self._export_all, state="disabled")
         self.btn_export_all.pack(side="left", padx=4)
+        self.btn_traj = ttk.Button(bar, text="属地轨迹", command=self._show_ip_trajectory, state="disabled")
+        self.btn_traj.pack(side="left", padx=4)
 
         self.var_limit = tk.StringVar(value="2000")
         ttk.Label(bar, text="条数上限:", style="Secondary.TLabel").pack(side="left", padx=(16, 4))
@@ -217,6 +220,23 @@ class UserQueryPanel(ttk.Frame):
         )
         self.lbl_count.configure(text=f"共 {total} 条")
 
+        # 分析 IP 属地流转轨迹
+        from analysis.ip_trajectory import analyze_user_ip_trajectory
+        self._traj = analyze_user_ip_trajectory(comments)
+        has_traj = bool(self._traj and self._traj.get("valid_records", 0) > 0)
+        self.btn_traj.configure(state="normal" if has_traj else "disabled")
+
+        if has_traj:
+            t = self._traj
+            extra = f" ｜ 属地: {' ➔ '.join(t['distinct_ips'][:3])}"
+            if len(t["distinct_ips"]) > 3:
+                extra += f" 等{len(t['distinct_ips'])}省"
+            if t["teleport_count"] > 0:
+                extra += f" ｜ ⚠ 异常瞬移 {t['teleport_count']} 次"
+            elif t["jump_count"] > 0:
+                extra += f" (流转 {t['jump_count']} 次)"
+            self.lbl_user.configure(text=self.lbl_user.cget("text") + extra)
+
         has_data = bool(self._rows)
         self.btn_export.configure(state="normal" if has_data else "disabled")
         self.btn_export_all.configure(state="normal" if has_data else "disabled")
@@ -345,6 +365,124 @@ class UserQueryPanel(ttk.Frame):
                 self.after(0, lambda: [box.destroy(), messagebox.showerror("导出失败", str(exc))])
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_ip_trajectory(self) -> None:
+        if not self._traj or not self._traj.get("valid_records"):
+            messagebox.showinfo("提示", "该用户暂无包含有效 IP 属地的发言记录")
+            return
+
+        traj = self._traj
+        uid = traj.get("uid") or self._last_uid
+        win = tk.Toplevel(self)
+        win.title(f"UID: {uid} 属地迁移轨迹与异常跳跃检测")
+        win.geometry("820x540")
+        win.configure(bg=C.BG_WINDOW)
+
+        # 顶栏概要卡片
+        summary_card = ClaudeCard(
+            win,
+            title=f"UID: {uid} IP 属地演化档案",
+            subtitle=f"风险评级: [{traj['risk_level']}] · 涉及属地: {'、'.join(traj['distinct_ips']) or '无'}",
+            padding=12,
+        )
+        summary_card.pack(fill="x", padx=12, pady=(12, 6))
+
+        lbl_desc = ttk.Label(summary_card.body, text=traj.get("summary", ""), style="Secondary.TLabel", wraplength=780)
+        lbl_desc.pack(anchor="w", pady=(0, 6))
+
+        metrics_frame = tk.Frame(summary_card.body, bg=C.BG_CARD)
+        metrics_frame.pack(fill="x")
+
+        def _add_metric(parent, label, val, is_alert=False):
+            box = tk.Frame(parent, bg=C.BG_CARD)
+            box.pack(side="left", padx=(0, 20))
+            color = C.ACCENT if is_alert else C.FG_PRIMARY
+            ttk.Label(box, text=label, style="Hint.TLabel").pack(anchor="w")
+            tk.Label(box, text=val, font=F.TITLE, bg=C.BG_CARD, fg=color).pack(anchor="w")
+
+        _add_metric(metrics_frame, "有效属地记录", f"{traj['valid_records']} 条")
+        _add_metric(metrics_frame, "跨域流转", f"{traj['jump_count']} 次")
+        _add_metric(metrics_frame, "异常瞬移", f"{traj['teleport_count']} 次", is_alert=(traj['teleport_count'] > 0))
+        _add_metric(metrics_frame, "最高隐含时速", f"{traj['max_speed_kmh']:,.0f} km/h", is_alert=(traj['max_speed_kmh'] > 1000))
+
+        # 中部表格卡片
+        table_card = ClaudeCard(
+            win,
+            title="属地跃迁时序明细",
+            subtitle="记录每次属地变更的起止时间、空间距离与隐含时速（超速瞬移多为代理池或账号租借）",
+            padding=10,
+        )
+        table_card.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        table_card.body.columnconfigure(0, weight=1)
+        table_card.body.rowconfigure(0, weight=1)
+
+        cols = [
+            ("idx", "序号", 6),
+            ("from_ip", "迁出地", 10),
+            ("to_ip", "迁往地", 10),
+            ("from_time", "离开时间", 18),
+            ("to_time", "到达时间", 18),
+            ("interval", "间隔耗时", 12),
+            ("dist", "大地距离", 12),
+            ("speed", "隐含时速", 14),
+            ("flag", "判定结论", 18),
+        ]
+        table = SmartTable(table_card.body, columns=cols, show="headings", height=10)
+        table.grid(row=0, column=0, sticky="nsew")
+
+        for i, tr in enumerate(traj.get("transitions") or [], start=1):
+            table.insert("", "end", values=(
+                i,
+                tr["from_ip"],
+                tr["to_ip"],
+                fmt_dt(tr["from_time"]),
+                fmt_dt(tr["to_time"]),
+                f"{tr['interval_hours']:.1f} 小时",
+                f"{tr['distance_km']:.0f} km",
+                f"{tr['speed_kmh']:,.0f} km/h",
+                tr["flag"],
+            ))
+
+        # 底栏按钮
+        btn_bar = tk.Frame(win, bg=C.BG_WINDOW)
+        btn_bar.pack(fill="x", padx=12, pady=(0, 12))
+
+        def _export_traj():
+            transitions = traj.get("transitions") or []
+            if not transitions:
+                messagebox.showinfo("提示", "该用户无跨属地跳转记录，无需导出")
+                return
+            path = filedialog.asksaveasfilename(
+                title="导出属地迁移轨迹",
+                defaultextension=".xlsx",
+                filetypes=[("Excel 工作簿", "*.xlsx"), ("CSV 文件", "*.csv")],
+                initialfile=f"uid_{uid}_ip_trajectory.xlsx",
+            )
+            if not path:
+                return
+            t_cols = [
+                ("from_ip", "迁出地"), ("to_ip", "迁往地"),
+                ("from_time", "离开时间"), ("to_time", "到达时间"),
+                ("interval_hours", "间隔耗时(小时)"), ("distance_km", "大地距离(km)"),
+                ("speed_kmh", "隐含时速(km/h)"), ("flag", "判定结论"),
+            ]
+            try:
+                if path.endswith(".xlsx"):
+                    import etl
+                    etl.export_to_styled_xlsx({"属地迁移轨迹": (t_cols, transitions)}, path)
+                else:
+                    import csv
+                    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                        w = csv.writer(fh)
+                        w.writerow([h for _, h in t_cols])
+                        for tr in transitions:
+                            w.writerow([tr.get(k, "") for k, _ in t_cols])
+                messagebox.showinfo("导出成功", f"已成功导出属地迁移轨迹至:\n{path}")
+            except Exception as exc:
+                messagebox.showerror("导出失败", str(exc))
+
+        ttk.Button(btn_bar, text="导出轨迹表", command=_export_traj).pack(side="left")
+        ttk.Button(btn_bar, text="关闭", command=win.destroy).pack(side="right")
 
     def _on_double_click(self, _event=None) -> None:
         sel = self.tree.selection()

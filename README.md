@@ -36,7 +36,9 @@ python main.py serve
 其他:
 - `python main.py doctor` 系统全链路环境与健康体检（DB、Cookie、磁盘、跑分）
 - `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
-- `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集打分，GUI「统计洞察」面板第 7 页签同步可用）
+- `python main.py iptrace --uid 123456` 查询指定用户的 IP 属地迁徙轨迹、流转时序链与瞬移风险判定
+- `python main.py iptrace --bvid BV18q4y1V7pM` 批量排查指定视频观众中的多地跳跃与代理池瞬移账号
+- `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集+异地瞬移综合打分，GUI「统计洞察」面板同步可用）
 - `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持选择性按需导出）
 - `python main.py export --bvid BV18q4y1V7pM --format sqlite --output bundle.sqlite` 打包视频全量生态数据为独立便携 SQLite 数据库（无视 MySQL 环境，任何机器双击秒开）
 - `python main.py export --bvid BV18q4y1V7pM --format xlsx --output bundle.xlsx` 导出带有 Claude 质感排版、冻结表头与斑马纹的多 Sheet 格式化 Excel
