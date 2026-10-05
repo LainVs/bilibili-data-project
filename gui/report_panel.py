@@ -35,6 +35,7 @@ class ReportPanel(ttk.Frame):
             "sec_terms": self.var_sec_terms.get(),
             "sec_water_army": self.var_sec_water_army.get(),
             "sec_top_comments": self.var_sec_top_comments.get(),
+            "sec_interactive": self.var_sec_interactive.get(),
         }
 
     def restore_state(self, state: dict) -> None:
@@ -48,7 +49,7 @@ class ReportPanel(ttk.Frame):
             self.var_auto_sync.set(bool(state["auto_sync"]))
         for var_name in (
             "sec_overview", "sec_trends", "sec_sentiment",
-            "sec_terms", "sec_water_army", "sec_top_comments"
+            "sec_terms", "sec_water_army", "sec_top_comments", "sec_interactive"
         ):
             if var_name in state and hasattr(self, f"var_{var_name}"):
                 getattr(self, f"var_{var_name}").set(bool(state[var_name]))
@@ -124,6 +125,7 @@ class ReportPanel(ttk.Frame):
         self.var_sec_terms = tk.BooleanVar(value=True)
         self.var_sec_water_army = tk.BooleanVar(value=True)
         self.var_sec_top_comments = tk.BooleanVar(value=True)
+        self.var_sec_interactive = tk.BooleanVar(value=True)
 
         ttk.Checkbutton(sec_grid, text="01 / 核心资产与指标总览 (评论/弹幕/独立用户/总赞)", variable=self.var_sec_overview).grid(row=0, column=0, sticky="w", pady=4)
         ttk.Checkbutton(sec_grid, text="02 / 互动传播与时间节律 (每日趋势折线 + 24小时分布柱状)", variable=self.var_sec_trends).grid(row=0, column=1, sticky="w", pady=4)
@@ -133,6 +135,8 @@ class ReportPanel(ttk.Frame):
 
         ttk.Checkbutton(sec_grid, text="05 / 水军刷屏与控评名单 (复读/爆发/同属地聚集证据链)", variable=self.var_sec_water_army).grid(row=2, column=0, sticky="w", pady=4)
         ttk.Checkbutton(sec_grid, text="06 / 精选高赞热评矩阵 (Top10 标志性代表发言)", variable=self.var_sec_top_comments).grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Checkbutton(sec_grid, text="07 / 互动发言检索透视 (可排序/可搜索/情感属地筛选 + 时间滑块)", variable=self.var_sec_interactive).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
 
         btn_bar = tk.Frame(s_body, bg=C.BG_CARD)
         btn_bar.pack(fill="x", pady=(6, 0))
@@ -193,14 +197,16 @@ class ReportPanel(ttk.Frame):
     def _select_all_sections(self) -> None:
         for var in (
             self.var_sec_overview, self.var_sec_trends, self.var_sec_sentiment,
-            self.var_sec_terms, self.var_sec_water_army, self.var_sec_top_comments
+            self.var_sec_terms, self.var_sec_water_army, self.var_sec_top_comments,
+            self.var_sec_interactive
         ):
             var.set(True)
 
     def _deselect_all_sections(self) -> None:
         for var in (
             self.var_sec_overview, self.var_sec_trends, self.var_sec_sentiment,
-            self.var_sec_terms, self.var_sec_water_army, self.var_sec_top_comments
+            self.var_sec_terms, self.var_sec_water_army, self.var_sec_top_comments,
+            self.var_sec_interactive
         ):
             var.set(False)
 
@@ -232,6 +238,7 @@ class ReportPanel(ttk.Frame):
             terms=self.var_sec_terms.get(),
             water_army=self.var_sec_water_army.get(),
             top_comments=self.var_sec_top_comments.get(),
+            interactive_table=self.var_sec_interactive.get(),
         )
 
         auto_sync = self.var_auto_sync.get()

@@ -22,11 +22,12 @@ logger = logging.getLogger(__name__)
 class ReportSections:
     """研报可选板块配置。"""
     overview: bool = True       # 核心资产与基础指标
-    trends: bool = True         # 互动走势与活跃时段
+    trends: bool = True         # 互动走势与活跃时段 (含交互式时间滑块)
     sentiment: bool = True      # 舆论情感倾向分布
     terms: bool = True          # 词频透视与核心热词
     water_army: bool = True     # 水军与控评可疑名单
     top_comments: bool = True   # 精选高赞神评展示
+    interactive_table: bool = True  # 内嵌全功能交互式可检索/排序评论表格与时间滑块联动
 
 
 @dataclass
@@ -43,6 +44,7 @@ class ReportData:
     ips: list[dict[str, Any]] = field(default_factory=list)
     suspects: list[dict[str, Any]] = field(default_factory=list)
     top_liked: list[dict[str, Any]] = field(default_factory=list)
+    interactive_comments: list[dict[str, Any]] = field(default_factory=list)
 
 
 def collect_report_data(
@@ -181,6 +183,45 @@ def collect_report_data(
             data.top_liked = sorted_by_like[:15]
         except Exception as exc:
             logger.warning("神评筛选异常: %s", exc)
+
+    # 7. 交互式数据检索表格样本准备（抽取高赞与最新代表样本供前端即时过滤下钻）
+    if sections.interactive_table:
+        try:
+            from analysis.text import sentiment_of
+            sorted_likes = sorted(
+                comments, key=lambda c: int(c.get("like_num", 0) or 0), reverse=True
+            )[:300]
+            sorted_recent = sorted(
+                comments, key=lambda c: str(c.get("ctime", "") or ""), reverse=True
+            )[:200]
+            merged_dict = {}
+            for c in sorted_likes + sorted_recent:
+                rpid = c.get("rpid")
+                if rpid and rpid not in merged_dict:
+                    merged_dict[rpid] = c
+            sample_src = list(merged_dict.values())
+            if not sample_src and comments:
+                sample_src = comments[:500]
+
+            interactive_list = []
+            for c in sample_src:
+                txt = str(c.get("content") or "")
+                s_val = sentiment_of(txt)
+                s_label = "pos" if s_val > 0 else ("neg" if s_val < 0 else "neu")
+                uname = str(c.get("uname") or c.get("member", {}).get("uname", "") or f"UID:{c.get('uid')}")
+                interactive_list.append({
+                    "rpid": int(c.get("rpid", 0) or 0),
+                    "uid": int(c.get("uid", 0) or 0),
+                    "uname": uname,
+                    "ctime": str(c.get("ctime") or "")[:19],
+                    "content": txt,
+                    "like_num": int(c.get("like_num", 0) or 0),
+                    "ip": str(c.get("ip_location") or "-"),
+                    "sentiment": s_label,
+                })
+            data.interactive_comments = interactive_list
+        except Exception as exc:
+            logger.warning("交互表格数据准备异常: %s", exc)
 
     return data
 
@@ -332,6 +373,301 @@ def render_svg_sentiment_donut(sent: dict, size: int = 180) -> str:
 
 # ── 主 HTML 模板构建 ──
 
+CLIENT_INTERACTIVE_JS = """
+(function() {
+  const rawDataEl = document.getElementById("report-raw-data");
+  if (!rawDataEl) return;
+  let rawData = {};
+  try {
+    rawData = JSON.parse(rawDataEl.textContent || "{}");
+  } catch (e) {
+    console.error("Failed to parse report data", e);
+    return;
+  }
+
+  const allDaily = rawData.daily || [];
+  const allComments = rawData.comments || [];
+
+  let minDayIdx = 0;
+  let maxDayIdx = allDaily.length > 0 ? allDaily.length - 1 : 0;
+  let cmtPage = 1;
+  const pageSize = 15;
+  let filteredComments = [...allComments];
+
+  // 1. 初始化 IP 属地下拉筛选框
+  const ipSelect = document.getElementById("cmt-filter-ip");
+  if (ipSelect) {
+    const rawIps = allComments.map(c => c.ip).filter(ip => ip && ip !== "-" && ip !== "未知");
+    const uniqueIps = Array.from(new Set(rawIps)).sort();
+    uniqueIps.forEach(ip => {
+      const opt = document.createElement("option");
+      opt.value = ip;
+      opt.textContent = ip;
+      ipSelect.appendChild(opt);
+    });
+  }
+
+  // 2. 动态 SVG 趋势图与双向时间滑块
+  function updateTrendChart() {
+    if (allDaily.length === 0) return;
+    const minSlider = document.getElementById("time-slider-min");
+    const maxSlider = document.getElementById("time-slider-max");
+    if (!minSlider || !maxSlider) return;
+
+    let iMin = parseInt(minSlider.value, 10);
+    let iMax = parseInt(maxSlider.value, 10);
+    if (iMin > iMax) {
+      const tmp = iMin; iMin = iMax; iMax = tmp;
+    }
+    minDayIdx = iMin;
+    maxDayIdx = iMax;
+
+    const subSeries = allDaily.slice(minDayIdx, maxDayIdx + 1);
+    const startDay = subSeries[0] ? subSeries[0].day : "";
+    const endDay = subSeries[subSeries.length - 1] ? subSeries[subSeries.length - 1].day : "";
+
+    const rangeText = document.getElementById("trend-range-text");
+    if (rangeText) {
+      rangeText.textContent = `${startDay} 至 ${endDay} (共 ${subSeries.length} 天)`;
+    }
+
+    const totalCnt = subSeries.reduce((acc, s) => acc + (s.cnt || 0), 0);
+    const avgCnt = subSeries.length > 0 ? Math.round(totalCnt / subSeries.length) : 0;
+    const rangeStats = document.getElementById("trend-range-stats");
+    if (rangeStats) {
+      rangeStats.textContent = `区间互动量: ${totalCnt.toLocaleString()} 条 · 日均: ${avgCnt.toLocaleString()} 条`;
+    }
+
+    renderDynamicLineChart(subSeries);
+    applyCommentFilters();
+  }
+
+  function renderDynamicLineChart(series) {
+    const container = document.getElementById("daily-chart-container");
+    if (!container || series.length < 2) return;
+
+    const width = 760, height = 240;
+    const paddingX = 50, paddingY = 30;
+    const w = width - paddingX * 2;
+    const h = height - paddingY * 2;
+
+    const counts = series.map(s => s.cnt || 0);
+    const maxC = Math.max(...counts, 1);
+    const n = series.length;
+
+    const points = series.map((s, i) => {
+      const x = paddingX + (i / (n - 1)) * w;
+      const y = height - paddingY - ((s.cnt || 0) / maxC) * h;
+      return [x, y];
+    });
+
+    const polyPts = points.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+    const areaPts = `${paddingX},${height - paddingY} ${polyPts} ${width - paddingX},${height - paddingY}`;
+
+    let svgHtml = `<svg width="100%" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;">
+      <defs>
+        <linearGradient id="lineGradDyn" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#da7756" stop-opacity="0.25"/>
+          <stop offset="100%" stop-color="#da7756" stop-opacity="0.0"/>
+        </linearGradient>
+      </defs>
+      <line x1="${paddingX}" y1="${height - paddingY}" x2="${width - paddingX}" y2="${height - paddingY}" stroke="#e7e5dc" stroke-width="1"/>
+      <line x1="${paddingX}" y1="${paddingY}" x2="${width - paddingX}" y2="${paddingY}" stroke="#f0eee6" stroke-dasharray="4" stroke-width="1"/>
+      <text x="${paddingX - 8}" y="${paddingY + 4}" fill="#8c877d" font-size="11" text-anchor="end">${maxC}</text>
+      <text x="${paddingX - 8}" y="${height - paddingY + 4}" fill="#8c877d" font-size="11" text-anchor="end">0</text>
+      <polygon points="${areaPts}" fill="url(#lineGradDyn)"/>
+      <polyline points="${polyPts}" fill="none" stroke="#da7756" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    const step = Math.max(1, Math.floor(n / 7));
+    points.forEach((p, i) => {
+      if (i % step === 0 || i === n - 1) {
+        const dayStr = (series[i].day || "").slice(-5);
+        svgHtml += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" fill="#ffffff" stroke="#da7756" stroke-width="2">
+          <title>${series[i].day}: ${series[i].cnt} 条</title>
+        </circle>
+        <text x="${p[0].toFixed(1)}" y="${height - 10}" fill="#8c877d" font-size="11" text-anchor="middle">${dayStr}</text>`;
+      }
+    });
+    svgHtml += `</svg>`;
+    container.innerHTML = svgHtml;
+  }
+
+  window.setTrendRangeDays = function(days) {
+    const minSlider = document.getElementById("time-slider-min");
+    const maxSlider = document.getElementById("time-slider-max");
+    if (!minSlider || !maxSlider || allDaily.length === 0) return;
+
+    document.querySelectorAll(".quick-btns .qbtn").forEach(btn => btn.classList.remove("active"));
+    if (window.event && window.event.target) {
+      window.event.target.classList.add("active");
+    }
+
+    if (days === 0 || days >= allDaily.length) {
+      minSlider.value = 0;
+      maxSlider.value = allDaily.length - 1;
+    } else {
+      minSlider.value = Math.max(0, allDaily.length - days);
+      maxSlider.value = allDaily.length - 1;
+    }
+    updateTrendChart();
+  };
+
+  window.onTimeSliderChange = function() {
+    document.querySelectorAll(".quick-btns .qbtn").forEach(btn => btn.classList.remove("active"));
+    updateTrendChart();
+  };
+
+  // 3. 交互式多维发言检索与表格分页
+  window.applyCommentFilters = function() {
+    const searchInput = document.getElementById("cmt-search");
+    const searchVal = (searchInput ? searchInput.value : "").trim().toLowerCase();
+    const sentSelect = document.getElementById("cmt-filter-sentiment");
+    const sentVal = sentSelect ? sentSelect.value : "";
+    const ipSelect = document.getElementById("cmt-filter-ip");
+    const ipVal = ipSelect ? ipSelect.value : "";
+    const sortSelect = document.getElementById("cmt-sort");
+    const sortVal = sortSelect ? sortSelect.value : "like";
+
+    let startDayStr = "", endDayStr = "";
+    if (allDaily.length > 0 && minDayIdx >= 0 && maxDayIdx < allDaily.length) {
+      startDayStr = allDaily[minDayIdx].day;
+      endDayStr = allDaily[maxDayIdx].day;
+    }
+
+    filteredComments = allComments.filter(c => {
+      if (searchVal) {
+        const inContent = (c.content || "").toLowerCase().includes(searchVal);
+        const inUname = (c.uname || "").toLowerCase().includes(searchVal);
+        const inUid = String(c.uid || "").includes(searchVal);
+        const inIp = (c.ip || "").toLowerCase().includes(searchVal);
+        if (!inContent && !inUname && !inUid && !inIp) return false;
+      }
+      if (sentVal && c.sentiment !== sentVal) return false;
+      if (ipVal && c.ip !== ipVal) return false;
+      if (startDayStr && endDayStr) {
+        const cDate = (c.ctime || "").slice(0, 10);
+        if (cDate && (cDate < startDayStr || cDate > endDayStr)) return false;
+      }
+      return true;
+    });
+
+    if (sortVal === "like") {
+      filteredComments.sort((a, b) => (b.like_num || 0) - (a.like_num || 0));
+    } else if (sortVal === "time_desc") {
+      filteredComments.sort((a, b) => (b.ctime || "").localeCompare(a.ctime || ""));
+    } else if (sortVal === "time_asc") {
+      filteredComments.sort((a, b) => (a.ctime || "").localeCompare(b.ctime || ""));
+    } else if (sortVal === "length") {
+      filteredComments.sort((a, b) => (b.content || "").length - (a.content || "").length);
+    }
+
+    cmtPage = 1;
+    renderCommentsTable(searchVal);
+  };
+
+  window.onFilterComments = function() {
+    applyCommentFilters();
+  };
+
+  window.changeCmtPage = function(delta) {
+    const totalPages = Math.max(1, Math.ceil(filteredComments.length / pageSize));
+    const newPage = cmtPage + delta;
+    if (newPage >= 1 && newPage <= totalPages) {
+      cmtPage = newPage;
+      const searchInput = document.getElementById("cmt-search");
+      const searchVal = (searchInput ? searchInput.value : "").trim().toLowerCase();
+      renderCommentsTable(searchVal);
+    }
+  };
+
+  function escapeHtml(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function highlightMatch(text, query) {
+    if (!query) return escapeHtml(text);
+    const escaped = escapeHtml(text);
+    const qEscaped = escapeHtml(query);
+    const reg = new RegExp(`(${qEscaped})`, "gi");
+    return escaped.replace(reg, '<mark style="background:#fef08a;color:#713f12;border-radius:2px;padding:0 2px;">$1</mark>');
+  }
+
+  function renderCommentsTable(searchQuery) {
+    const tbody = document.getElementById("interactive-comments-tbody");
+    const countEl = document.getElementById("cmt-filter-count");
+    const pageInfo = document.getElementById("cmt-page-info");
+    const prevBtn = document.getElementById("btn-prev-page");
+    const nextBtn = document.getElementById("btn-next-page");
+
+    if (!tbody) return;
+
+    if (countEl) {
+      countEl.innerHTML = `共检索到 <b>${filteredComments.length.toLocaleString()}</b> 条发言`;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(filteredComments.length / pageSize));
+    if (pageInfo) pageInfo.textContent = `第 ${cmtPage} / ${totalPages} 页`;
+    if (prevBtn) prevBtn.disabled = (cmtPage <= 1);
+    if (nextBtn) nextBtn.disabled = (cmtPage >= totalPages);
+
+    if (filteredComments.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#8c877d;padding:40px;">未找到匹配条件的发言记录</td></tr>`;
+      return;
+    }
+
+    const startIdx = (cmtPage - 1) * pageSize;
+    const pageRows = filteredComments.slice(startIdx, startIdx + pageSize);
+
+    let rowsHtml = "";
+    pageRows.forEach((c, idx) => {
+      const globalIdx = startIdx + idx + 1;
+      const sentBadge = c.sentiment === "pos"
+        ? '<span class="badge" style="background:#e6f9ed;color:#166534;">🟢 正面</span>'
+        : (c.sentiment === "neg"
+            ? '<span class="badge" style="background:#fef2f2;color:#991b1b;">🔴 负面</span>'
+            : '<span class="badge" style="background:#f1f5f9;color:#475569;">⚪ 中性</span>');
+
+      const unameEsc = highlightMatch(c.uname || "", searchQuery);
+      const contentEsc = highlightMatch(c.content || "", searchQuery);
+
+      rowsHtml += `<tr>
+        <td style="color:#8c877d;font-size:12px;">${globalIdx}</td>
+        <td><b>${unameEsc}</b><br><small style="color:#8c877d;">UID:${c.uid}</small></td>
+        <td>${escapeHtml(c.ip || "-")}</td>
+        <td style="font-size:12px;color:#615d56;">${escapeHtml(c.ctime || "")}</td>
+        <td><b style="color:#da7756;">👍 ${(c.like_num || 0).toLocaleString()}</b></td>
+        <td>${sentBadge}</td>
+        <td style="line-height:1.5;">
+          <div>${contentEsc}</div>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = rowsHtml;
+  }
+
+  // 4. 初始化加载与首屏呈现
+  if (allDaily.length > 0) {
+    const minSlider = document.getElementById("time-slider-min");
+    const maxSlider = document.getElementById("time-slider-max");
+    if (minSlider && maxSlider) {
+      minSlider.max = allDaily.length - 1;
+      maxSlider.max = allDaily.length - 1;
+      minSlider.value = 0;
+      maxSlider.value = allDaily.length - 1;
+    }
+  }
+  updateTrendChart();
+  applyCommentFilters();
+})();
+"""
+
 def build_html_report(data: ReportData, sections: ReportSections | None = None) -> str:
     """生成排版精美、完全自包含、可打印的单文件 HTML 报告。"""
     sections = sections or ReportSections()
@@ -408,14 +744,42 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
     if sections.trends and (data.daily or data.hours):
         svg_daily = render_svg_line_chart(data.daily)
         svg_hours = render_svg_hours_bar(data.hours)
+        n_days = len(data.daily)
+        max_idx = max(0, n_days - 1)
+        start_day = data.daily[0]["day"] if data.daily else ""
+        end_day = data.daily[-1]["day"] if data.daily else ""
+
+        trend_ctrl = ""
+        if n_days >= 2:
+            trend_ctrl = f"""
+            <div class="trend-controls">
+              <div class="range-display">
+                <span class="range-tag">时间窗口</span>
+                <b id="trend-range-text">{start_day} 至 {end_day} (共 {n_days} 天)</b>
+                <span class="range-stats" id="trend-range-stats">拖动滑块可联动缩放折线图并筛选下方发言</span>
+              </div>
+              <div class="quick-btns">
+                <button type="button" class="qbtn active" onclick="setTrendRangeDays(0)">全部</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(7)">近7天</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(14)">近14天</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(30)">近30天</button>
+              </div>
+            </div>
+            <div class="slider-wrapper">
+              <input type="range" id="time-slider-min" min="0" max="{max_idx}" value="0" oninput="onTimeSliderChange()">
+              <input type="range" id="time-slider-max" min="0" max="{max_idx}" value="{max_idx}" oninput="onTimeSliderChange()">
+            </div>
+            """
+
         content_blocks.append(f"""
         <section class="section">
           <h2 class="section-title">02 / 互动传播与时间节律</h2>
           <div class="card-grid-2">
             <div class="card">
               <h3 class="card-title">每日评论/弹幕热度走势</h3>
-              <p class="card-desc">近 30 天每日内容增量与互动波峰</p>
-              <div class="chart-box">{svg_daily}</div>
+              <p class="card-desc">互动波峰走势（支持双滑块无级缩放与快速视窗切换）</p>
+              {trend_ctrl}
+              <div class="chart-box" id="daily-chart-container">{svg_daily}</div>
             </div>
             <div class="card">
               <h3 class="card-title">24 小时活跃时段分布</h3>
@@ -536,7 +900,80 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
         </section>
         """)
 
+    # 7. 交互式数据检索表格与数据下钻
+    if sections.interactive_table:
+        content_blocks.append("""
+        <section class="section" id="section-interactive">
+          <h2 class="section-title">07 / 互动发言检索透视与数据下钻</h2>
+          <div class="card">
+            <h3 class="card-title">发言样本多维即时检索</h3>
+            <p class="card-desc">纯本地无网络离线计算：支持关键词毫秒级过滤、情感倾向筛选、省份属地交叉聚合与多种排序模式</p>
+
+            <div class="filter-toolbar">
+              <div class="search-box">
+                <input type="text" id="cmt-search" placeholder="🔍 实时搜索发言内容、用户昵称、UID 或属地..." oninput="onFilterComments()">
+              </div>
+              <div class="filter-group">
+                <select id="cmt-filter-sentiment" onchange="onFilterComments()">
+                  <option value="">全部情感倾向</option>
+                  <option value="pos">🟢 正向认同</option>
+                  <option value="neu">⚪ 中性客观</option>
+                  <option value="neg">🔴 负向争议</option>
+                </select>
+                <select id="cmt-filter-ip" onchange="onFilterComments()">
+                  <option value="">全部 IP 属地</option>
+                </select>
+                <select id="cmt-sort" onchange="onFilterComments()">
+                  <option value="like">按点赞数最高</option>
+                  <option value="time_desc">按发布时间倒序 (最新)</option>
+                  <option value="time_asc">按发布时间正序 (最早)</option>
+                  <option value="length">按发言文本长度</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="filter-summary">
+              <span id="cmt-filter-count">正在载入数据样本...</span>
+              <div class="pagination-controls">
+                <button type="button" class="page-btn" id="btn-prev-page" onclick="changeCmtPage(-1)" disabled>‹ 上一页</button>
+                <span id="cmt-page-info">第 1 / 1 页</span>
+                <button type="button" class="page-btn" id="btn-next-page" onclick="changeCmtPage(1)" disabled>下一页 ›</button>
+              </div>
+            </div>
+
+            <div class="table-container">
+              <table class="report-table interactive-table" id="interactive-comments-table">
+                <thead>
+                  <tr>
+                    <th style="width:48px;">#</th>
+                    <th style="width:140px;">用户 (UID)</th>
+                    <th style="width:70px;">属地</th>
+                    <th style="width:140px;">发表时间</th>
+                    <th style="width:80px;">点赞数</th>
+                    <th style="width:75px;">情感倾向</th>
+                    <th>发言正文内容</th>
+                  </tr>
+                </thead>
+                <tbody id="interactive-comments-tbody">
+                  <tr><td colspan="7" style="text-align:center;color:#8c877d;padding:30px;">正在加载...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        """)
+
     rendered_body = "\n".join(content_blocks)
+
+    raw_payload = {
+        "daily": data.daily,
+        "comments": data.interactive_comments,
+    }
+    json_str = json.dumps(raw_payload, ensure_ascii=False).replace("</script>", "<\\/script>")
+    scripts_html = f"""
+    <script id="report-raw-data" type="application/json">{json_str}</script>
+    <script>{CLIENT_INTERACTIVE_JS}</script>
+    """
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -748,6 +1185,151 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
       color: var(--fg-secondary);
       line-height: 1.5;
     }}
+    /* 趋势控制栏与时间滑块 */
+    .trend-controls {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: var(--bg-page);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }}
+    .range-display {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--fg-secondary);
+      flex-wrap: wrap;
+    }}
+    .range-tag {{
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent);
+      background: var(--accent-light);
+      padding: 2px 6px;
+      border-radius: 3px;
+    }}
+    .range-stats {{
+      font-size: 11px;
+      color: var(--fg-muted);
+    }}
+    .quick-btns {{
+      display: inline-flex;
+      gap: 4px;
+    }}
+    .qbtn {{
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      color: var(--fg-secondary);
+      transition: all 0.15s;
+    }}
+    .qbtn:hover {{ border-color: var(--accent); color: var(--accent); }}
+    .qbtn.active {{
+      background: var(--fg-primary);
+      color: #ffffff;
+      border-color: var(--fg-primary);
+      font-weight: 600;
+    }}
+    .slider-wrapper {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+      padding: 0 4px;
+    }}
+    .slider-wrapper input[type="range"] {{
+      flex: 1;
+      height: 6px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }}
+
+    /* 交互式表格与工具栏 */
+    .filter-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 14px;
+    }}
+    .search-box {{
+      flex: 1;
+      min-width: 240px;
+    }}
+    .search-box input {{
+      width: 100%;
+      padding: 8px 12px;
+      font-size: 13px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-page);
+      color: var(--fg-primary);
+      outline: none;
+      transition: border-color 0.2s;
+    }}
+    .search-box input:focus {{ border-color: var(--accent); background: #ffffff; }}
+    .filter-group {{
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .filter-group select {{
+      padding: 7px 10px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-page);
+      color: var(--fg-primary);
+      outline: none;
+      cursor: pointer;
+    }}
+    .filter-group select:focus {{ border-color: var(--accent); }}
+    .filter-summary {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-size: 12px;
+      color: var(--fg-muted);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }}
+    .pagination-controls {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .page-btn {{
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--fg-secondary);
+    }}
+    .page-btn:disabled {{
+      opacity: 0.4;
+      cursor: not-allowed;
+    }}
+    .page-btn:not(:disabled):hover {{
+      border-color: var(--accent);
+      color: var(--accent);
+    }}
+    .table-container {{
+      overflow-x: auto;
+    }}
+    .interactive-table td {{
+      vertical-align: top;
+    }}
     footer.report-footer {{
       margin-top: 48px;
       padding-top: 16px;
@@ -759,6 +1341,7 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
     @media print {{
       body {{ background: #ffffff; padding: 0; }}
       .card, .kpi-card {{ border: 1px solid #ccc; }}
+      .trend-controls, .slider-wrapper, .filter-toolbar, .pagination-controls {{ display: none !important; }}
     }}
   </style>
 </head>
@@ -781,6 +1364,7 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
       <p>由 Bilibili Data Project 自动生成 · 零外部网络依赖单文件离线报告</p>
     </footer>
   </div>
+  {scripts_html}
 </body>
 </html>
 """

@@ -99,6 +99,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_report.add_argument("--no-terms", action="store_true", help="不包含词频板块")
     p_report.add_argument("--no-detect", action="store_true", help="不包含水军检测板块")
     p_report.add_argument("--no-comments", action="store_true", help="不包含精选神评板块")
+    p_report.add_argument("--no-interactive", action="store_true", help="不包含交互检索表格与时间滑块")
     p_report.add_argument("--sync", dest="auto_sync", action="store_true", default=True, help="生成前自动增量补采最新数据与官方指标（默认开启）")
     p_report.add_argument("--no-sync", dest="auto_sync", action="store_false", help="仅基于本地已有数据离线生成，不联网补采")
 
@@ -411,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             terms=not args.no_terms,
             water_army=not args.no_detect,
             top_comments=not args.no_comments,
+            interactive_table=not args.no_interactive,
         )
         out = args.output.strip() or f"logs/report_{args.bvid}.html"
         path = generate_report(args.bvid, out, limit=args.limit, sections=sec, auto_sync=args.auto_sync)

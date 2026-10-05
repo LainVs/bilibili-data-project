@@ -58,14 +58,19 @@ def test_build_html_report_selective():
     assert "讨论热词与观众地域" in html_all
     assert "水军刷屏与控评可疑名单" in html_all
     assert "精选高赞热评" in html_all
+    assert "互动发言检索透视与数据下钻" in html_all
+    assert "time-slider-min" in html_all
+    assert "interactive-comments-table" in html_all
+    assert "report-raw-data" in html_all
 
     # 2. 选择性关闭某些板块
-    sec = ReportSections(trends=False, water_army=False, sentiment=False)
+    sec = ReportSections(trends=False, water_army=False, sentiment=False, interactive_table=False)
     html_partial = build_html_report(data, sections=sec)
     assert "核心指标概览" in html_partial
     assert "互动传播与时间节律" not in html_partial
     assert "水军刷屏与控评可疑名单" not in html_partial
     assert "舆论倾向与情感基调" not in html_partial
+    assert "互动发言检索透视与数据下钻" not in html_partial
 
 
 def test_generate_report_disk():
