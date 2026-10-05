@@ -103,3 +103,19 @@ def test_export_to_styled_xlsx():
         assert ws_cmt.cell(row=2, column=1).value == "1"
 
         wb.close()
+
+
+def test_export_to_styled_xlsx_invalid_sheet_chars():
+    # 测试包含冒号、斜杠等 Excel 非法字符的 Sheet 命名，确保自动替换防崩溃
+    sheets = {
+        "UID:12345/测试*表": ([("k", "键")], [{"k": "v1"}]),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "test_invalid_title.xlsx")
+        n = export_to_styled_xlsx(sheets, p)
+        assert n == 1
+        assert os.path.exists(p)
+        wb = openpyxl.load_workbook(p)
+        assert len(wb.sheetnames) == 1
+        assert ":" not in wb.sheetnames[0] and "/" not in wb.sheetnames[0]
+        wb.close()

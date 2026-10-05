@@ -123,11 +123,14 @@ def analyze_user_ip_trajectory(
     valid_events.sort(key=lambda x: x["ts"])
 
     uid = 0
-    if rows:
+    for r in rows or []:
         try:
-            uid = int((rows[0] or {}).get("uid", 0) or 0)
+            u = int((r or {}).get("uid", 0) or 0)
+            if u > 0:
+                uid = u
+                break
         except (ValueError, TypeError):
-            pass
+            continue
 
     if not valid_events:
         return {

@@ -106,3 +106,14 @@ def test_detect_water_army_teleport_integration():
     assert "异地瞬移" in r["hits"]
     assert r["teleport_count"] >= 1
     assert r["level"] in ("high", "suspect")
+
+
+def test_analyze_user_ip_trajectory_sparse_uid():
+    # 首行 uid 缺失或为 0 时，能自动扫描到后续有效 uid
+    rows = [
+        {"uid": 0, "ctime": "2026-09-01 10:00:00", "ip_location": "北京", "content": "c1"},
+        {"uid": 8888, "ctime": "2026-09-01 11:00:00", "ip_location": "北京", "content": "c2"},
+    ]
+    res = analyze_user_ip_trajectory(rows)
+    assert res["uid"] == 8888
+    assert res["valid_records"] == 2

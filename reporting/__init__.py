@@ -417,7 +417,13 @@ CLIENT_INTERACTIVE_JS = """
     let iMin = parseInt(minSlider.value, 10);
     let iMax = parseInt(maxSlider.value, 10);
     if (iMin > iMax) {
-      const tmp = iMin; iMin = iMax; iMax = tmp;
+      if (document.activeElement === minSlider) {
+        maxSlider.value = iMin;
+        iMax = iMin;
+      } else {
+        minSlider.value = iMax;
+        iMin = iMax;
+      }
     }
     minDayIdx = iMin;
     maxDayIdx = iMax;
@@ -444,7 +450,7 @@ CLIENT_INTERACTIVE_JS = """
 
   function renderDynamicLineChart(series) {
     const container = document.getElementById("daily-chart-container");
-    if (!container || series.length < 2) return;
+    if (!container || series.length === 0) return;
 
     const width = 760, height = 240;
     const paddingX = 50, paddingY = 30;
@@ -456,13 +462,15 @@ CLIENT_INTERACTIVE_JS = """
     const n = series.length;
 
     const points = series.map((s, i) => {
-      const x = paddingX + (i / (n - 1)) * w;
+      const x = paddingX + (n > 1 ? (i / (n - 1)) * w : w / 2);
       const y = height - paddingY - ((s.cnt || 0) / maxC) * h;
       return [x, y];
     });
 
     const polyPts = points.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-    const areaPts = `${paddingX},${height - paddingY} ${polyPts} ${width - paddingX},${height - paddingY}`;
+    const areaPts = n > 1
+      ? `${paddingX},${height - paddingY} ${polyPts} ${width - paddingX},${height - paddingY}`
+      : `${paddingX},${height - paddingY} ${points[0][0].toFixed(1)},${points[0][1].toFixed(1)} ${width - paddingX},${height - paddingY}`;
 
     let svgHtml = `<svg width="100%" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;">
       <defs>
@@ -492,13 +500,15 @@ CLIENT_INTERACTIVE_JS = """
     container.innerHTML = svgHtml;
   }
 
-  window.setTrendRangeDays = function(days) {
+  window.setTrendRangeDays = function(days, btn) {
     const minSlider = document.getElementById("time-slider-min");
     const maxSlider = document.getElementById("time-slider-max");
     if (!minSlider || !maxSlider || allDaily.length === 0) return;
 
-    document.querySelectorAll(".quick-btns .qbtn").forEach(btn => btn.classList.remove("active"));
-    if (window.event && window.event.target) {
+    document.querySelectorAll(".quick-btns .qbtn").forEach(b => b.classList.remove("active"));
+    if (btn) {
+      btn.classList.add("active");
+    } else if (window.event && window.event.target) {
       window.event.target.classList.add("active");
     }
 
@@ -590,12 +600,20 @@ CLIENT_INTERACTIVE_JS = """
       .replace(/'/g, "&#39;");
   }
 
+  function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+  }
+
   function highlightMatch(text, query) {
     if (!query) return escapeHtml(text);
     const escaped = escapeHtml(text);
-    const qEscaped = escapeHtml(query);
-    const reg = new RegExp(`(${qEscaped})`, "gi");
-    return escaped.replace(reg, '<mark style="background:#fef08a;color:#713f12;border-radius:2px;padding:0 2px;">$1</mark>');
+    const qEscaped = escapeRegExp(escapeHtml(query));
+    try {
+      const reg = new RegExp(`(${qEscaped})`, "gi");
+      return escaped.replace(reg, '<mark style="background:#fef08a;color:#713f12;border-radius:2px;padding:0 2px;">$1</mark>');
+    } catch (e) {
+      return escaped;
+    }
   }
 
   function renderCommentsTable(searchQuery) {
@@ -759,10 +777,10 @@ def build_html_report(data: ReportData, sections: ReportSections | None = None) 
                 <span class="range-stats" id="trend-range-stats">拖动滑块可联动缩放折线图并筛选下方发言</span>
               </div>
               <div class="quick-btns">
-                <button type="button" class="qbtn active" onclick="setTrendRangeDays(0)">全部</button>
-                <button type="button" class="qbtn" onclick="setTrendRangeDays(7)">近7天</button>
-                <button type="button" class="qbtn" onclick="setTrendRangeDays(14)">近14天</button>
-                <button type="button" class="qbtn" onclick="setTrendRangeDays(30)">近30天</button>
+                <button type="button" class="qbtn active" onclick="setTrendRangeDays(0, this)">全部</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(7, this)">近7天</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(14, this)">近14天</button>
+                <button type="button" class="qbtn" onclick="setTrendRangeDays(30, this)">近30天</button>
               </div>
             </div>
             <div class="slider-wrapper">

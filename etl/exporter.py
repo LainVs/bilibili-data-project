@@ -163,7 +163,12 @@ def export_to_sqlite(
             cols_quoted = ", ".join(f'"{c}"' for c in col_defs)
             insert_sql = f'INSERT OR REPLACE INTO "{tbl_name}" ({cols_quoted}) VALUES ({placeholders})'
 
-            data_tuples = [tuple(r.get(c) for c in col_defs) for r in rows]
+            def _sqlite_val(v):
+                if isinstance(v, (dict, list)):
+                    return json.dumps(v, ensure_ascii=False)
+                return v
+
+            data_tuples = [tuple(_sqlite_val(r.get(c)) for c in col_defs) for r in rows]
             cur.executemany(insert_sql, data_tuples)
             counts[tbl_name] = len(data_tuples)
 
@@ -204,9 +209,11 @@ def export_to_styled_xlsx(
     )
 
     total_rows = 0
+    import re
 
     for sheet_name, (mapping, rows) in sheets.items():
-        ws = wb.create_sheet(title=sheet_name[:31])
+        clean_title = re.sub(r'[\\/*?:\[\]]', '_', str(sheet_name))[:31].strip() or "Sheet"
+        ws = wb.create_sheet(title=clean_title)
         if not rows:
             ws.append(["暂无数据"])
             continue
@@ -278,8 +285,15 @@ def export_video_bundle(
     comments = dao.query_comments_by_video(aid, limit=fetch_limit) or []
     danmaku = dao.query_danmaku_by_video(aid, limit=fetch_limit) or []
 
-    uids = list({int(c.get("uid")) for c in comments if c.get("uid") and int(c.get("uid")) > 0} |
-                {int(d.get("uid")) for d in danmaku if d.get("uid") and int(d.get("uid")) > 0})
+    def _safe_uid(v: Any) -> int | None:
+        try:
+            val = int(v)
+            return val if val > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    uids = list({u for c in comments if (u := _safe_uid(c.get("uid")))} |
+                {u for d in danmaku if (u := _safe_uid(d.get("uid")))})
     users = []
     if uids:
         sub_uids = uids[:500]
@@ -288,18 +302,19 @@ def export_video_bundle(
             for role in ("write", "read"):
                 try:
                     conn = get_conn(role)
-                    with conn.cursor() as cur:
-                        fmt_u = ",".join(["%s"] * len(sub_uids))
-                        cur.execute(
-                            f"SELECT uid, uname, level, sex, is_vip, signature, fans FROM dim_user WHERE uid IN ({fmt_u})",
-                            tuple(sub_uids),
-                        )
-                        found = list(cur.fetchall())
-                        if found:
-                            users.extend(found)
-                            conn.close()
-                            break
-                    conn.close()
+                    try:
+                        with conn.cursor() as cur:
+                            fmt_u = ",".join(["%s"] * len(sub_uids))
+                            cur.execute(
+                                f"SELECT uid, uname, level, sex, is_vip, signature, fans FROM dim_user WHERE uid IN ({fmt_u})",
+                                tuple(sub_uids),
+                            )
+                            found = list(cur.fetchall())
+                            if found:
+                                users.extend(found)
+                                break
+                    finally:
+                        conn.close()
                 except Exception:
                     pass
         except Exception:

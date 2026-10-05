@@ -427,10 +427,17 @@ class UserQueryPanel(ttk.Frame):
             ("speed", "隐含时速", 14),
             ("flag", "判定结论", 18),
         ]
-        table = SmartTable(table_card.body, columns=cols, show="headings", height=10)
+        table = SmartTable(table_card.body, show="headings", height=10)
+        table.set_columns(cols)
+        table.tag_configure("teleport", foreground=C.ACCENT)
         table.grid(row=0, column=0, sticky="nsew")
 
+        sb = ttk.Scrollbar(table_card.body, command=table.yview)
+        table.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
         for i, tr in enumerate(traj.get("transitions") or [], start=1):
+            tag = ("teleport",) if tr.get("is_teleport") else ()
             table.insert("", "end", values=(
                 i,
                 tr["from_ip"],
@@ -441,7 +448,7 @@ class UserQueryPanel(ttk.Frame):
                 f"{tr['distance_km']:.0f} km",
                 f"{tr['speed_kmh']:,.0f} km/h",
                 tr["flag"],
-            ))
+            ), tags=tag)
 
         # 底栏按钮
         btn_bar = tk.Frame(win, bg=C.BG_WINDOW)

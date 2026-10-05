@@ -150,7 +150,7 @@ def detect_water_army(
             g["raw_events"].append({"ctime": (r or {}).get("ctime"), "ip_location": ip})
 
     out: list[dict[str, Any]] = []
-    from analysis.ip_trajectory import analyze_user_ip_trajectory
+    from analysis.ip_trajectory import analyze_user_ip_trajectory, match_standard_province
 
     for uid, g in groups.items():
         texts = [t for t in g["texts"] if t]
@@ -166,7 +166,8 @@ def detect_water_army(
 
         teleport_count = 0
         jump_count = 0
-        if len(set(g["ips"])) >= 2 and len(g["raw_events"]) >= 2:
+        distinct_valid_ips = {match_standard_province(ip) for ip in g["ips"]} - {"未知"}
+        if len(distinct_valid_ips) >= 2 and len(g["raw_events"]) >= 2:
             try:
                 traj = analyze_user_ip_trajectory(g["raw_events"])
                 teleport_count = traj.get("teleport_count", 0)
