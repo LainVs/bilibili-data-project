@@ -493,6 +493,20 @@ net start MySQL80-E 2>&1 | Out-Host
             def on_prog(msg: str):
                 self.after(0, lambda: self.lbl_tip.configure(text=msg))
                 self.after(0, lambda m=msg: self._append_log(m, tag="info"))
+                m0 = re.search(r"\[CLEARPCT\s*(\d+)\]", msg)
+                if m0:
+                    # 清D阶段心跳：实时显示已删行数/速率/ETA，进度条不再冻结
+                    try:
+                        pct = max(0, min(100, int(m0.group(1))))
+
+                        def _apply_clear(p=pct):
+                            self.prog.configure(maximum=100, value=p)
+                            self.lbl_prog.configure(text=f"清D {p}%")
+
+                        self.after(0, _apply_clear)
+                    except Exception:
+                        pass
+                    return
                 m = re.search(r"拷\s*(\d+)-(\d+)", msg)
                 if m:
                     try:

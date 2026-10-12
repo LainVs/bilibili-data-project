@@ -56,6 +56,21 @@ def _fmt(v):
     if isinstance(v, datetime): return v.strftime("%Y-%m-%d %H:%M:%S")
     return str(v)
 
+
+def _fmt_eta(sec: float) -> str:
+    """将剩余秒数格式化为人类可读时长（纯函数，可单测）。"""
+    try:
+        s = max(0, int(sec))
+    except (TypeError, ValueError):
+        return "--"
+    if s < 60:
+        return f"{s}秒"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m}分{sec:02d}秒"
+    h, m = divmod(m, 60)
+    return f"{h}小时{m:02d}分"
+
 def list_shards():
     try:
         e = _get_conn("read")
@@ -467,26 +482,95 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             em.commit(); em.close()
     except Exception as e: _report(f"progress同步E主库跳过: {e}")
     _report("验对通过，清D...")
+    _report("提示：清D期间建议暂停采集任务；无新写入时走TRUNCATE秒清，有写入时为逐批DELETE（慢但可随时取消，已删部分实时提交不丢失）")
     d = _get_conn("write")
     try:
         with d.cursor() as cur:
+            total_del = sum(len(copied_ids.get(t, []) or []) for t, _, _ in _TABLES)
+            done_del = 0
+            cancelled = False
+            err_table = ""
             for table, pk, cols in _TABLES:
-                ids = copied_ids.get(table, [])
-                if not ids: continue
-                # 快路径：D期间无新写入则TRUNCATE秒清
+                ids = list(copied_ids.get(table, []) or [])
+                if not ids:
+                    continue
+                if stop_flag is not None and stop_flag.is_set():
+                    cancelled = True
+                    break
                 cur.execute(f"SELECT COUNT(*) AS n FROM {table}")
                 r = cur.fetchone(); cur_n = r["n"] if isinstance(r, dict) else r[0]
                 if cur_n == len(ids):
                     _report(f"{table}: TRUNCATE 秒清")
                     cur.execute(f"TRUNCATE TABLE {table}")
-                else:
-                    _kept = cur_n - len(ids)
-                    # 估算漂移可能导致负数，钳到 0（COUNT(*) 精确，负数只可能是估算口径）
-                    _report(f"{table}: 增量DELETE {len(ids)} 行（期间新增{max(0, _kept)}行保留）")
-                    for i in range(0, len(ids), 1000):
-                        chunk = ids[i:i+1000]
-                        fmt = ",".join(["%s"]*len(chunk))
+                    d.commit()
+                    done_del += len(ids)
+                    if total_del > 0:
+                        _pct_all = done_del * 100 // total_del
+                        _report(f"清D进度 {done_del:,}/{total_del:,} 行 ({_pct_all}%) [CLEARPCT {_pct_all}]")
+                    continue
+                _kept = cur_n - len(ids)
+                # id 升序：顺序主键删除，缓冲池页命中率最高（续跑名单可能乱序，必须排）
+                try:
+                    ids.sort()
+                except Exception:
+                    pass
+                n_ids = len(ids)
+                _report(f"{table}: 增量DELETE {n_ids:,} 行（期间新增{max(0, _kept):,}行保留），每1000行提交一次，可随时取消")
+                CHUNK_D = 1000
+                t0 = time.time()
+                last_rep = 0.0
+                done_tbl = 0
+                table_broken = False
+                for i in range(0, n_ids, CHUNK_D):
+                    if stop_flag is not None and stop_flag.is_set():
+                        try: d.commit()
+                        except Exception: pass
+                        cancelled = True
+                        break
+                    chunk = ids[i:i + CHUNK_D]
+                    fmt = ",".join(["%s"] * len(chunk))
+                    try:
                         cur.execute(f"DELETE FROM {table} WHERE {pk} IN ({fmt})", tuple(chunk))
+                    except Exception as exc:
+                        # 瞬时失败（锁等待超时等）：仅本批未提交，回滚后重试一次
+                        try: d.rollback()
+                        except Exception: pass
+                        time.sleep(2)
+                        try:
+                            cur.execute(f"DELETE FROM {table} WHERE {pk} IN ({fmt})", tuple(chunk))
+                        except Exception as exc2:
+                            try: d.rollback()
+                            except Exception: pass
+                            err_table = table
+                            _report(f"{table}: 分块删除连续失败，中断本表（已提交 {done_tbl:,}/{n_ids:,} 行，E库数据完整，下次自动续清）: {exc2}")
+                            table_broken = True
+                            break
+                    try:
+                        d.commit()
+                    except Exception as exc:
+                        err_table = table
+                        _report(f"{table}: 提交失败，中断（{exc}）")
+                        table_broken = True
+                        break
+                    done_tbl += len(chunk)
+                    done_del += len(chunk)
+                    now = time.time()
+                    if now - last_rep >= 5 or done_tbl >= n_ids:
+                        last_rep = now
+                        el = max(0.1, now - t0)
+                        rate = done_tbl / el
+                        pct_tbl = done_tbl * 100 // n_ids
+                        eta = _fmt_eta((n_ids - done_tbl) / rate) if rate > 0 else "--"
+                        pct_all = done_del * 100 // total_del if total_del > 0 else 100
+                        _report(f"清D {table}: 已删 {done_tbl:,}/{n_ids:,} 行 ({pct_tbl}%) | 速率 {rate:,.0f}行/s | 预计剩余 {eta} [CLEARPCT {pct_all}]")
+                if cancelled or table_broken:
+                    break
+                _report(f"{table}: 清D完成，共删 {done_tbl:,} 行，用时 {_fmt_eta(time.time() - t0)}")
+            if cancelled:
+                _report(f"已取消归档（清D已提交 {done_del:,}/{total_del:,} 行，E库数据完整无损，下次归档自动续清剩余）")
+                return {"ok": False, "msg": f"已取消归档，清D已提交 {done_del:,} 行", "shard": shard}
+            if err_table:
+                return {"ok": False, "msg": f"{err_table} 清D中断，已提交 {done_del:,} 行（E库完整，下次自动续清）", "shard": shard}
             cur.execute("TRUNCATE TABLE crawl_progress")
             cur.execute("TRUNCATE TABLE stat_comment_uids")
             cur.execute("TRUNCATE TABLE stat_comment_aids")
