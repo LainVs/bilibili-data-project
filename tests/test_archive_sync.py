@@ -1,5 +1,5 @@
 """归档模块纯函数单测：无需数据库。"""
-from storage.archive_sync import _TABLES, _fmt_eta
+from storage.archive_sync import _TABLES, _choose_clear_strategy, _fmt_eta
 
 
 def test_fmt_eta_seconds():
@@ -25,3 +25,14 @@ def test_clear_tables_order():
     # 清D顺序：小表先行，大表收尾（meta -> dim -> danmaku -> comments）
     names = [t for t, _, _ in _TABLES]
     assert names == ["meta_video", "dim_user", "raw_danmaku", "raw_comments"]
+
+
+def test_choose_clear_strategy():
+    # 数量异常（无新增但对不上）：保守逐批删
+    assert _choose_clear_strategy(90, 100) == "chunked"
+    # 小漂移：TRUNCATE+回插快路径
+    assert _choose_clear_strategy(120, 100) == "reinsert"
+    assert _choose_clear_strategy(11868059, 11413106) == "reinsert"  # 本次真实漂移45万
+    assert _choose_clear_strategy(11413106 + 1_000_000, 11413106) == "reinsert"  # 边界
+    # 大漂移：逐批删
+    assert _choose_clear_strategy(11413106 + 1_000_001, 11413106) == "chunked"

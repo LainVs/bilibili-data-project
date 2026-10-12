@@ -71,6 +71,29 @@ def _fmt_eta(sec: float) -> str:
     h, m = divmod(m, 60)
     return f"{h}小时{m:02d}分"
 
+
+# 回插快路径的漂移上限：漂移行超过此数则捞回成本过高，回退逐批DELETE。
+# 100万行 LOAD 回插约 1~2 分钟，远快于同等规模随机删除。
+_DRIFT_REINSERT_MAX = 1_000_000
+
+
+class _ClearCancelled(Exception):
+    """清D回插快路径中用户取消（TRUNCATE前，无任何修改，可安全退出）。"""
+
+
+def _choose_clear_strategy(cur_n: int, n_ids: int) -> str:
+    """纯函数：按漂移量决定清D子策略。
+
+    返回 "truncate"（零漂移秒清，由调用方精确相等分支处理）/
+    "reinsert"（小漂移：捞出→TRUNCATE→回插）/ "chunked"（大漂移或数量异常：逐批DELETE）。
+    """
+    drift = cur_n - n_ids
+    if drift <= 0:
+        return "chunked"  # 无新增漂移但数量对不上：保守逐批删（删不存在的行是无害空操作）
+    if drift <= _DRIFT_REINSERT_MAX:
+        return "reinsert"
+    return "chunked"
+
 def list_shards():
     try:
         e = _get_conn("read")
@@ -106,6 +129,117 @@ def _save_progress(d: dict):
         with open(_PROGRESS_FILE, "w", encoding="utf-8") as f: json.dump(d, f)
     except Exception:
         pass
+
+
+def _clear_via_truncate_reinsert(d, table: str, pk: str, cols: list,
+                                 ids: list, cur_n: int,
+                                 stop_flag, report) -> dict:
+    """漂移很少时的系统级快路径：流式捞出漂移行→TRUNCATE秒清→LOAD回插。
+
+    原理：删1100万保45万是本末倒置；全表顺序扫一遍捞出漂移（数分钟），
+    TRUNCATE秒清，LOAD回插漂移（约1分钟），快两个数量级。
+    要求调用前暂停采集；全程持有 WRITE 锁，TRUNCATE之前可随时取消
+    （零副作用），TRUNCATE之后必须走完回插（CSV落盘可供人工恢复）。
+    ids 必须已升序。返回 {"deleted": 名单行数, "drift": 回插行数}。
+    """
+    from pymysql.cursors import SSCursor
+
+    col_list = ", ".join(cols)
+    pk_idx = cols.index(pk)
+    n_ids = len(ids)
+    fname = f"retain_{table}_{uuid.uuid4().hex[:8]}.csv"
+    out_path = os.path.join(OUT_DIR, fname)
+    out_sql = out_path.replace("\\", "/")
+    drift = 0
+    scanned = 0
+    t0 = time.time()
+    last_rep = 0.0
+    try:
+        d.commit()
+    except Exception:
+        pass
+    ssc = None
+    try:
+        with d.cursor() as lk:
+            lk.execute(f"LOCK TABLES {table} WRITE")
+        try:
+            # 阶段1（可取消）：单遍顺序扫 + 归并指针分离漂移行
+            ssc = d.cursor(SSCursor)
+            ssc.execute(f"SELECT {col_list} FROM {table} ORDER BY {pk}")
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                p = 0
+                for row in ssc:
+                    rpk = row[pk_idx]
+                    while p < n_ids and ids[p] < rpk:
+                        p += 1
+                    if p < n_ids and ids[p] == rpk:
+                        pass  # 已拷贝，TRUNCATE时一并清掉
+                    else:
+                        w.writerow([_fmt(v) for v in row])
+                        drift += 1
+                    scanned += 1
+                    if scanned % 50000 == 0:
+                        if stop_flag is not None and stop_flag.is_set():
+                            raise _ClearCancelled()
+                        now = time.time()
+                        if now - last_rep >= 10:
+                            last_rep = now
+                            report(f"清D {table}: 扫描漂移 {scanned:,}/{cur_n:,} 行，已捞出 {drift:,} 行...")
+            try:
+                ssc.close()
+            except Exception:
+                pass
+            ssc = None
+            if stop_flag is not None and stop_flag.is_set():
+                raise _ClearCancelled()
+            # 阶段2（不可取消，必须走完）：TRUNCATE + 回插 + 验数
+            t1 = time.time()
+            with d.cursor() as cur:
+                cur.execute(f"TRUNCATE TABLE {table}")
+                if drift > 0:
+                    cur.execute("SET SESSION sql_mode=''")
+                    cur.execute(
+                        f"LOAD DATA INFILE %s IGNORE INTO TABLE {table} "
+                        f"FIELDS TERMINATED BY ',' ENCLOSED BY '\"' LINES TERMINATED BY '\\n' ({col_list})",
+                        (out_sql,),
+                    )
+                cur.execute(f"SELECT COUNT(*) AS n FROM {table}")
+                r = cur.fetchone()
+                back = r["n"] if isinstance(r, dict) else r[0]
+            d.commit()
+            if back != drift:
+                raise RuntimeError(
+                    f"回插验对失败：期望 {drift:,} 行，实际 {back:,} 行"
+                    f"（CSV保留在 {out_path}，可人工恢复）")
+            report(f"清D {table}: TRUNCATE秒清 + 回插 {drift:,} 行"
+                   f"（回插用时 {_fmt_eta(time.time() - t1)}，含扫描共 {_fmt_eta(time.time() - t0)}）")
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+            return {"deleted": n_ids, "drift": drift}
+        finally:
+            try:
+                with d.cursor() as lk2:
+                    lk2.execute("UNLOCK TABLES")
+            except Exception:
+                pass
+    except _ClearCancelled:
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except Exception:
+            pass
+        raise
+    finally:
+        if ssc is not None:
+            try:
+                ssc.close()
+            except Exception:
+                pass
+
+
 def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) -> dict:
     if _same_dsn():
         return {"ok": False, "msg": "D与E同库，不执行"}
@@ -482,7 +616,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             em.commit(); em.close()
     except Exception as e: _report(f"progress同步E主库跳过: {e}")
     _report("验对通过，清D...")
-    _report("提示：清D期间建议暂停采集任务；无新写入时走TRUNCATE秒清，有写入时为逐批DELETE（慢但可随时取消，已删部分实时提交不丢失）")
+    _report("提示：清D期间建议暂停采集任务；零漂移TRUNCATE秒清，小漂移捞回重插快路径（数分钟），大漂移逐批DELETE（可中断续清）")
     d = _get_conn("write")
     try:
         with d.cursor() as cur:
@@ -515,6 +649,29 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                 except Exception:
                     pass
                 n_ids = len(ids)
+                if _choose_clear_strategy(cur_n, n_ids) == "reinsert":
+                    # 快路径2：漂移很少，删千万保几十万是本末倒置 —— 捞出漂移→TRUNCATE秒清→插回
+                    _report(f"{table}: 漂移仅 {max(0, _kept):,} 行，走TRUNCATE+回插快路径（数分钟搞定）")
+                    try:
+                        _res = _clear_via_truncate_reinsert(
+                            d, table, pk, cols, ids, cur_n, stop_flag, _report)
+                    except _ClearCancelled:
+                        try:
+                            d.commit()
+                        except Exception:
+                            pass
+                        cancelled = True
+                        break
+                    except Exception as exc:
+                        err_table = table
+                        _report(f"{table}: 回插快路径失败，D库未动（E库数据完整，可重试或转人工）: {exc}")
+                        break
+                    done_del += _res["deleted"]
+                    if total_del > 0:
+                        _pct_all = done_del * 100 // total_del
+                        _report(f"清D进度 {done_del:,}/{total_del:,} 行 ({_pct_all}%) [CLEARPCT {_pct_all}]")
+                    _report(f"{table}: 清D完成，TRUNCATE秒清并回插漂移 {_res['drift']:,} 行")
+                    continue
                 _report(f"{table}: 增量DELETE {n_ids:,} 行（期间新增{max(0, _kept):,}行保留），每1000行提交一次，可随时取消")
                 CHUNK_D = 1000
                 t0 = time.time()
