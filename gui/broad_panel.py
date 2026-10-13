@@ -223,6 +223,7 @@ class BroadPanel(ttk.Frame):
                     return
         self.txt.configure(state="normal")
         self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", "（已清空 — 运行采集后，实时流与候选将显示在此）")
         self.txt.configure(state="disabled")
         self._stick_bottom = True  # 新一批内容恢复跟随底部
         for i in self.tree.get_children():

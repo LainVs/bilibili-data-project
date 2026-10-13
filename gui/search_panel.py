@@ -523,6 +523,9 @@ class SearchPanel(ttk.Frame):
             label = {"cmt": "评论", "dmk": "弹幕", "video": "视频"}[sec]
             btn.configure(text=f"{label} {n}" + ("" if t == n else f"/{t or '≥' + str(n)}"))
         self.btn_export.configure(state="normal" if any(shown.values()) else "disabled")
+        if not any(shown.values()) and not cancelled and not failed:
+            self.lbl_hint.configure(
+                text=f"未找到匹配「{kw_display}」的内容 — 请检查关键词或时间范围后重试")
         self._render_sec()
 
     def _query(self, sources: dict, kw: str, start: str, end: str, limit: int,
@@ -631,6 +634,15 @@ class SearchPanel(ttk.Frame):
                     r.get("bvid", ""), up, r.get("comment_count", 0),
                     r.get("danmaku_count", 0)))
                 self._list_iids[iid] = r
+        if not rows:
+            # 空状态：给表格一行引导，证明不是面板坏了
+            cols = tree.cget("columns") or ("c0",)
+            tree.insert("", "end", tags=("empty",),
+                        values=(("暂无匹配内容 — 换关键词或时间范围再试",) + ("",) * (len(cols) - 1)))
+            try:
+                tree.tag_configure("empty", foreground=C.MUTED)
+            except Exception:
+                pass
 
     def _render_text(self, sec: str, rows: list[dict]) -> None:
         txt = self.txt

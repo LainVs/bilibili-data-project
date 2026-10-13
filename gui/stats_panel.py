@@ -32,6 +32,7 @@ class StatsPanel(ttk.Frame):
         super().__init__(master)
         self._stats_q: queue.Queue = queue.Queue()
         self._db_q: queue.Queue = queue.Queue()
+        self._poll_after_id = None
         self._build_ui()
         self.start_polling()
         self._load_cached()
@@ -60,6 +61,7 @@ class StatsPanel(ttk.Frame):
                 self._db_q.put(None)
 
         threading.Thread(target=_worker, daemon=True).start()
+        self._kick_poll()
 
     def _reset_refresh_btns(self) -> None:
         try:
@@ -102,10 +104,15 @@ class StatsPanel(ttk.Frame):
                 self._stats_q.put(None)  # 无缓存 → 显示占位，不自动刷
 
         threading.Thread(target=_worker, daemon=True).start()
+        self._kick_poll()
 
     def start_polling(self) -> None:
-        """主线程周期排污结果队列（每 200ms），实现线程安全回填。"""
-        self.after(200, self.start_polling)
+        """主线程周期排污结果队列（每 200ms），实现线程安全回填。
+
+        仅在「有 worker 在跑或队列非空」时重排；空闲停表，避免每秒 5 次
+        空转唤醒（用 _kick_poll 在发起各类统计任务时重新启动）。
+        """
+        self._poll_after_id = None
         if getattr(self, "_auto_stats", False):
             self._auto_stats = False
             self.refresh(mode="stats_only")  # 坏缓存/无缓存：自动补真实统计
@@ -140,6 +147,21 @@ class StatsPanel(ttk.Frame):
                 self._apply_db_info(info)
         except queue.Empty:
             pass
+        if self._has_active_work():
+            self._poll_after_id = self.after(200, self.start_polling)
+
+    def _has_active_work(self) -> bool:
+        """是否有在跑的统计线程或未排空的队列（决定排污轮询是否继续）。"""
+        for attr in ("_stats_thread", "_insight_thread", "_detect_thread"):
+            th = getattr(self, attr, None)
+            if th is not None and th.is_alive():
+                return True
+        return not (self._stats_q.empty() and self._db_q.empty())
+
+    def _kick_poll(self) -> None:
+        """发起统计任务时调用：确保排污轮询在运行。"""
+        if getattr(self, "_poll_after_id", None) is None:
+            self._poll_after_id = self.after(200, self.start_polling)
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -430,6 +452,7 @@ class StatsPanel(ttk.Frame):
 
         self._insight_thread = threading.Thread(target=_worker, daemon=True)
         self._insight_thread.start()
+        self._kick_poll()
 
     def _apply_insights(self, ins: dict | None, charts: dict,
                         summary: str) -> None:
@@ -610,6 +633,7 @@ class StatsPanel(ttk.Frame):
 
         self._detect_thread = threading.Thread(target=_worker, daemon=True)
         self._detect_thread.start()
+        self._kick_poll()
 
     def _check_detect_join(self) -> None:
         try:
@@ -936,6 +960,7 @@ class StatsPanel(ttk.Frame):
             self._stats_q.put((stats, ranks, now))
         self._stats_thread = threading.Thread(target=_worker, daemon=True)
         self._stats_thread.start()
+        self._kick_poll()
 
 
     def _set_updated(self, text: str) -> None:
