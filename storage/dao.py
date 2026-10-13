@@ -1462,7 +1462,9 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
         except EArchiveOfflineError as e:
             logger.warning(f"_count 全仓失败且E离线: {e} sql={sql[:60]}")
             return 0, list(dbs)
-        except Exception:
+        except Exception as e:
+            # 返回 0 会让统计面板显示 0 而非报错；必须留日志，否则数据静默失真是个哑弹
+            logger.warning(f"_count 全仓兜底查询失败(返回0): {e} sql={sql[:60]}")
             return 0, list(dbs)
 
     _failed_lock = threading.Lock()

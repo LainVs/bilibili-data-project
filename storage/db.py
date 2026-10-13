@@ -4,11 +4,14 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 
 import pymysql
 
 from config import get_config
+
+logger = logging.getLogger(__name__)
 
 
 def _cfg_for(role: str) -> dict:
@@ -212,16 +215,17 @@ def _migrate(cur) -> None:
         cur.execute("SELECT COUNT(*) AS n FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='meta_video' AND index_name='idx_owner'")
         if cur.fetchone()["n"] == 0:
             cur.execute("ALTER TABLE meta_video ADD KEY idx_owner (owner_uid)")
-    except Exception:
-        pass
+    except Exception as exc:
+        # 建索引失败会导致相关查询退化为全表扫描（E 库上百秒），必须可见
+        logger.warning("idx_owner 索引检查/创建失败，后续按 owner_uid 查询可能全表扫描: %s", exc)
     # (uid, ctime) 覆盖索引：按用户查评论/弹幕 ORDER BY ctime，无它时优化器倒扫全表回表，HDD 上百秒
     for _tbl in ("raw_comments", "raw_danmaku"):
         try:
             cur.execute("SELECT COUNT(*) AS n FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=%s AND index_name='idx_uid_ctime'", (_tbl,))
             if cur.fetchone()["n"] == 0:
                 cur.execute(f"ALTER TABLE {_tbl} ADD KEY idx_uid_ctime (uid, ctime)")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("%s 的 idx_uid_ctime 索引检查/创建失败，按用户+时间查询可能全表扫描: %s", _tbl, exc)
 
 
 def _add_column(cur, table: str, column: str, alter_sql: str) -> None:
@@ -234,8 +238,9 @@ def _add_column(cur, table: str, column: str, alter_sql: str) -> None:
     if cur.fetchone()["n"] == 0:
         try:
             cur.execute(alter_sql)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 缺列会让依赖该列的写入/查询报错，静默吞掉极难排查
+            logger.warning("为 %s 补列 %s 失败，请手动执行迁移: %s", table, column, exc)
 
 
 # ---- DDL 集合 ----

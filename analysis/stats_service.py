@@ -297,7 +297,8 @@ def fetch_rows_for_detect(bvid: str = "", limit: int = 5000) -> tuple[list[dict]
         # 留空：用洞察抽样兜底，保证无输入也有数据可看
         try:
             rows = sample_texts_for_insight(limit=min(int(limit), 5000))
-        except Exception:
+        except Exception as exc:
+            logger.warning("检测兜底抽样失败，按空数据处理: %s", exc)
             rows = []
         return rows, {}
     except Exception as exc:
