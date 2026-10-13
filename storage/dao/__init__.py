@@ -1,14 +1,36 @@
-"""数据访问层：向 MySQL 幂等写入采集数据。"""
+"""数据访问层包：向 MySQL 幂等写入采集数据。
+
+拆包结构：
+- _core.py    连接复用 / shard 列表 / 跨库判定 / StatsCancelled / 共享状态
+- search.py   评论·弹幕·视频跨仓检索
+- rankings.py 排行榜与每日/每小时趋势
+- 本 __init__ 承载写入路径与常规查询，并从上述子模块重导出函数，
+  使 `from storage import dao; dao.xxx()` 与既有的 monkeypatch 契约不变。
+"""
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 from collections.abc import Iterable
 
 import pymysql
 
+# 基础设施与共享状态（单一实例，供子模块与本模块共用）
+from storage.dao._core import (
+    _SHARD_CACHE,
+    _SHARD_TTL,
+    StatsCancelled,
+    _drop_cached,
+    _open_conn,
+    _rcached,
+    _rclose_all,
+    _shard_dbs,
+    _shard_dbs_trusted,
+    _tls,
+    _uid_same_dsn,
+    logger,
+)
 from storage.db import ensure_stats_cache_table, ensure_up_stat_table
 from storage.db import get_conn as _get_conn
 
@@ -35,110 +57,21 @@ def _r_strict():
         raise EArchiveOfflineError(f"E归档库离线: {exc}") from exc
 
 
-# 线程级读连接复用：同一线程内同 (role, db, 超时) 只建连一次，
-# ping(reconnect=True) 保活；短生命周期的线程结束时由 GC 回收。
-_tls = threading.local()
 
 
-def _open_conn(role: str, db: str, read_timeout: int):
-    import pymysql
-
-    from config import get_config
-    if role == "write":
-        base = getattr(get_config(), "mysql_write", get_config().mysql)
-    else:
-        base = getattr(get_config(), "mysql_archive", get_config().mysql)
-    return pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
-                           password=base["password"], database=db, charset=base["charset"],
-                           cursorclass=pymysql.cursors.DictCursor, connect_timeout=5,
-                           read_timeout=read_timeout)
 
 
-def _rcached(role: str, db: str, read_timeout: int = 120):
-    """取线程复用读连接；断线自动重连。调用方不关闭。"""
-    cache = getattr(_tls, "conns", None)
-    if cache is None:
-        cache = {}
-        _tls.conns = cache
-    key = (role, db, read_timeout)
-    conn = cache.get(key)
-    if conn is not None:
-        try:
-            conn.ping(reconnect=True)
-            return conn
-        except Exception:
-            try: conn.close()
-            except Exception: pass
-    conn = _open_conn(role, db, read_timeout)
-    cache[key] = conn
-    return conn
 
 
-def _drop_cached(role: str, db: str, read_timeout: int = 120) -> None:
-    """丢掉线程复用池里坏掉的连接，下次重建。"""
-    cache = getattr(_tls, "conns", None)
-    if not cache:
-        return
-    conn = cache.pop((role, db, read_timeout), None)
-    if conn is not None:
-        try: conn.close()
-        except Exception: pass
 
 
-def _rclose_all() -> None:
-    """关闭本线程全部复用读连接（如取消/收尾时调用，可选）。"""
-    cache = getattr(_tls, "conns", None)
-    if not cache:
-        return
-    for conn in list(cache.values()):
-        try: conn.close()
-        except Exception: pass
-    cache.clear()
 
-_SHARD_CACHE: dict = {"time": 0.0, "shards": [], "ok": False}
-_SHARD_TTL = 60.0
 
-def _shard_dbs_trusted() -> tuple[list, bool]:
-    """带可信标记的 shard 列表（60s 缓存）。
 
-    返回 (dbs, ok)：ok=False 表示本次列表拉取失败（用了兜底/缓存），
-    调用方不得把结果当全量存缓存。
-    """
-    import time as _t
-    now = _t.monotonic()
-    hit = _SHARD_CACHE.get("shards")
-    if hit and (now - _SHARD_CACHE.get("time", 0)) < _SHARD_TTL:
-        return list(hit), bool(_SHARD_CACHE.get("ok", True))
-    try:
-        from storage.archive_sync import list_shards
-        shards = [s for s in (list_shards() or []) if s]
-        base = "bilibili_data"
-        uniq: list = []
-        seen: set = set()
-        for s in shards:
-            if s not in seen:
-                seen.add(s); uniq.append(s)
-        if base not in seen:
-            uniq = [base] + uniq
-        _SHARD_CACHE.update({"time": now, "shards": list(uniq), "ok": True})
-        return uniq, True
-    except Exception as exc:
-        logger.warning("shard 列表拉取失败: %s", exc)
-        if hit:
-            # 用上次可信列表，但标记不可信
-            _SHARD_CACHE["ok"] = False
-            return list(hit), False
-        _SHARD_CACHE.update({"time": now, "shards": ["bilibili_data"], "ok": False})
-        return ["bilibili_data"], False
-
-def _shard_dbs():
-    dbs, _ok = _shard_dbs_trusted()
-    return dbs
 
 def get_conn(role="write"):
     return _get_conn(role)
 
-logger = logging.getLogger(__name__)
 
 # 进程内写互斥：采集线程并发批插相同主键（如 dim_user 同 uid）会互相持锁
 # 等待形成死锁风暴（曾拖垮整库）。串行化后锁冲突归零，吞吐影响可忽略。
@@ -1096,16 +1029,6 @@ def list_all_video_aids() -> list[int]:
         conn.close()
 
 
-def _uid_same_dsn() -> bool:
-    """D 与 E 是否同库（单库模式）：是则只查一次，避免重复计数。"""
-    try:
-        from config import get_config
-        cfg = get_config()
-        w = getattr(cfg, "mysql_write", cfg.mysql)
-        r = getattr(cfg, "mysql_archive", cfg.mysql)
-        return w["host"] == r["host"] and w["port"] == r["port"] and w["database"] == r["database"]
-    except Exception:
-        return True
 
 
 def _query_comments_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -> list[dict]:
@@ -1329,8 +1252,6 @@ def count_saved_videos() -> int:
         conn.close()
 
 
-class StatsCancelled(Exception):
-    """统计/排行榜被用户取消（协作式，查完当前仓即停）。"""
 
 
 def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -> dict:
@@ -2228,1016 +2149,87 @@ def _exec_map_chunk(sql: str, rows: list[tuple], *, conn=None) -> int:
 
 # ---------------- 全局搜索 ----------------
 
-def _like_esc(keyword: str) -> str:
-    """转义 LIKE 元字符（% _ \\），防用户输入干扰通配。"""
-    return (
-        keyword
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
 
 
-def _parse_keywords(raw: str) -> list[str]:
-    """把逗号/空格分隔的关键词字符串解析为去重列表（保持顺序）。"""
-    import re as _re
-    parts = _re.split(r"[,，\s]+", (raw or "").strip())
-    seen: set = set()
-    out: list[str] = []
-    for p in parts:
-        p = p.strip()
-        if p and p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
 
 
-def parse_smart_query(raw: str) -> list[list[str]]:
-    """智能查询解析：空格/逗号=同时包含(AND)，OR/|=任一包含，引号=精确短语。
-
-    例：`烂片,剧情差` -> [[烂片],[剧情差]] 的 AND（单组多词）；
-        `a OR b` / `a|b` -> [[a],[b]]（多组 OR）；
-        `"白厄 开箱"` -> [["白厄 开箱"]]（引号内空格不拆分）。
-    返回 OR-组列表，每组为 AND 词列表；空查询返回 []。
-    """
-    import re as _re
-    text = (raw or "").strip()
-    if not text:
-        return []
-    # 先按 OR 分组（大小写不敏感的 OR 单词，或 | / ／ 分隔符）
-    groups = _re.split(r"\s*(?:\bOR\b|\||／)\s*", text, flags=_re.IGNORECASE)
-    out: list[list[str]] = []
-    for g in groups:
-        # 引号短语整体保留，其余按逗号/中文逗号/空白拆分
-        toks = _re.findall(r'"([^"]+)"|“([^”]+)”|([^,，\s]+)', g)
-        terms: list[str] = []
-        for a, b, c in toks:
-            t = (a or b or c).strip()
-            if t and t not in terms:
-                terms.append(t)
-        if terms:
-            out.append(terms)
-    return out
 
 
-def flatten_smart_query(groups: list[list[str]]) -> list[str]:
-    """OR-组压平成去重词表（用于高亮/展示）。"""
-    seen: set = set()
-    out: list[str] = []
-    for g in groups:
-        for t in g:
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
-    return out
 
 
-def _like_cond_smart(alias: str, groups: list[list[str]]) -> tuple[str, list]:
-    """智能查询的 LIKE 条件：组内 AND、组间 OR。"""
-    parts, params = [], []
-    for terms in groups:
-        conds = []
-        for kw in terms:
-            conds.append(f"{alias}.content LIKE %s")
-            params.append("%" + _like_esc(kw) + "%")
-        parts.append("(" + " AND ".join(conds) + ")")
-    return " AND (" + " OR ".join(parts) + ")", params
 
 
-def _ft_term(keyword: str) -> str:
-    """把关键词包装成 ngram 全文索引的布尔短语（含转义）。
-
-    ngram_token_size=2：短语"残影里"会被分词为 残影/影里 两个二元组，
-    与正文的二元组分词逐段比对，等效"包含子串"匹配；对于 2 字符词
-    （如"残影"）即是精确包含匹配。返回 "kw" 形式（IN BOOLEAN MODE）。
-    """
-    kw = keyword.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{kw}"'
 
 
-def _ft_usable(keyword: str) -> bool:
-    """是否是 ngram 全文索引可处理的词（≥2 字符；单字走原 LIKE 兜底）。"""
-    return len(keyword.strip()) >= 2
 
 
-def _multi_ft_usable(keywords: list[str]) -> bool:
-    """多关键词场景：全部 ≥2 字符才走 FULLTEXT，否则回退 LIKE。"""
-    return bool(keywords) and all(_ft_usable(k) for k in keywords)
 
 
-def _multi_like_cond(alias: str, keywords: list[str]) -> tuple[str, list]:
-    """多关键词 AND LIKE 条件：每个关键词都要出现在 content 中。"""
-    conds, params = [], []
-    for kw in keywords:
-        conds.append(f" AND {alias}.content LIKE %s")
-        params.append("%" + _like_esc(kw) + "%")
-    return "".join(conds), params
 
 
-def _multi_ft_where(alias: str, keywords: list[str]) -> tuple[str, list]:
-    """多关键词 FULLTEXT AND 条件：用 +\"kw1\" +\"kw2\" ... 布尔模式。
-
-    ngram 全文索引下 +\"kw\" 表示该短语必须出现，多个 + 之间是 AND。
-    """
-    terms = " ".join(f'+{_ft_term(k)}' for k in keywords)
-    return f" AND MATCH({alias}.content) AGAINST(%s IN BOOLEAN MODE)", [terms]
 
 
-def _dt_cond(alias: str, start: str, end: str) -> tuple[str, tuple]:
-    """时间范围条件（按每行日期字符串 ts >= start AND ts <= end 过滤）。"""
-    cond, params = "", []
-    if start:
-        cond += f" AND {alias} >= %s"
-        params.append(start)
-    if end:
-        cond += f" AND {alias} <= %s"
-        params.append(end)
-    return cond, params
 
 
-def _exclude_likes(exclude: str) -> tuple[str, list]:
-    """把“排除词(逗号分隔)”转成 NOT LIKE 条件。
-
-    解决子串匹配误伤：如搜“国男”会命中“中国男人/外国男人”，
-    填排除词“中国男,外国男”即可过滤。
-    """
-    words = [w.strip() for w in (exclude or "").split(",") if w.strip()]
-    conds = []
-    params: list = []
-    for w in words:
-        conds.append(" AND c.content NOT LIKE %s")
-        params.append("%" + _like_esc(w) + "%")
-    return "".join(conds), params
 
 
-def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclude: str, limit: int,
-                   keywords: list[str] | None = None, groups: list[list[str]] | None = None,
-                   min_like: int = 0):
-    if groups is None:
-        groups = [keywords] if keywords else parse_smart_query(keyword)
-    groups = [g for g in groups if g]
-    if not groups:
-        return []
-    kw_list = flatten_smart_query(groups)
-    if not limit or limit <= 0:
-        limit = 500000
-    import pymysql
-
-    from config import get_config
-    cfg = get_config()
-    base = getattr(cfg, "mysql_archive" if role=="read" else "mysql_write", cfg.mysql)
-    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"], password=base["password"], database=db, charset=base["charset"], cursorclass=pymysql.cursors.DictCursor, connect_timeout=5, read_timeout=120)
-    try:
-        with conn.cursor() as cur:
-            cond, params = _dt_cond("c.ctime", start, end)
-            excl, excl_params = _exclude_likes(exclude)
-            like_cond = ""
-            like_params: list = []
-            if min_like and min_like > 0:
-                like_cond = " AND c.like_num >= %s"
-                like_params = [int(min_like)]
-            cols = ("t.rpid, t.uid, u.uname, t.content, t.like_num, t.ctime, t.ip_location, t.video_aid, v.bvid, v.title, v.owner_uid, v.owner_name")
-            if len(groups) > 1:
-                # OR 查询走 LIKE（布尔全文索引表达不了 OR-of-AND，直接 LIKE 最准）
-                smart_where, smart_params = _like_cond_smart("c", groups)
-                cols_c = cols.replace("t.", "c.")
-                where = "1=1" + smart_where + cond + excl + like_cond
-                sql = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
-                cur.execute(sql, [*smart_params, *params, *excl_params, *like_params, limit])
-            elif len(kw_list) == 1 and _ft_usable(kw_list[0]):
-                # 单关键词 FULLTEXT 路径（原有逻辑）
-                term = _ft_term(kw_list[0])
-                sub_lim = limit * 3 + 3
-                inner_cols = "c.rpid, c.uid, c.content, c.like_num, c.ctime, c.ip_location, c.video_aid"
-                inner = f"SELECT {inner_cols} FROM {db}.raw_comments c WHERE MATCH(c.content) AGAINST(%s IN BOOLEAN MODE)" + cond + excl + like_cond + " LIMIT %s"
-                sql = f"SELECT {cols} FROM ({inner}) t LEFT JOIN {db}.meta_video v ON v.aid=t.video_aid LEFT JOIN {db}.dim_user u ON u.uid=t.uid ORDER BY t.ctime DESC LIMIT %s"
-                try:
-                    cur.execute(sql, [term, *params, *excl_params, *like_params, sub_lim, limit])
-                except Exception:
-                    pat = "%" + _like_esc(kw_list[0]) + "%"
-                    where = "c.content LIKE %s" + cond + excl + like_cond
-                    cols_c = cols.replace("t.", "c.")
-                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
-                    cur.execute(sql2, [pat, *params, *excl_params, *like_params, limit])
-            elif len(kw_list) >= 2 and _multi_ft_usable(kw_list):
-                # 多关键词 FULLTEXT AND 路径
-                ft_where, ft_params = _multi_ft_where("c", kw_list)
-                inner_cols = "c.rpid, c.uid, c.content, c.like_num, c.ctime, c.ip_location, c.video_aid"
-                inner = f"SELECT {inner_cols} FROM {db}.raw_comments c WHERE 1=1" + ft_where + cond + excl + like_cond + f" LIMIT {limit * 3 + 3}"
-                sql = f"SELECT {cols} FROM ({inner}) t LEFT JOIN {db}.meta_video v ON v.aid=t.video_aid LEFT JOIN {db}.dim_user u ON u.uid=t.uid ORDER BY t.ctime DESC LIMIT %s"
-                try:
-                    cur.execute(sql, [*ft_params, *params, *excl_params, *like_params, limit])
-                except Exception:
-                    # FULLTEXT 失败回退 LIKE
-                    fb_where, fb_params = _multi_like_cond("c", kw_list)
-                    cols_c = cols.replace("t.", "c.")
-                    where = "1=1" + fb_where + cond + excl + like_cond
-                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
-                    cur.execute(sql2, [*fb_params, *params, *excl_params, *like_params, limit])
-            else:
-                # LIKE 路径（单关键词单字 / 多关键词回退）
-                fb_where, fb_params = _multi_like_cond("c", kw_list)
-                cols_c = cols.replace("t.", "c.")
-                where = "1=1" + fb_where + cond + excl + like_cond
-                sql = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
-                cur.execute(sql, [*fb_params, *params, *excl_params, *like_params, limit])
-            return list(cur.fetchall())
-    finally:
-        conn.close()
-
-def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: str = "", limit: int = 100,
-                    progress_cb=None, min_like: int = 0) -> dict:
-    """跨库搜评论。D 写缓冲最先查（全文索引秒出首屏），E 各仓随后逐仓回调。
-
-    progress_cb(db_label, rows): 每完成一仓立即回调，GUI 流式展示。
-    min_like: 只要点赞数 >= 该值的评论（找高赞神评）。
-    查询语法：空格/逗号=同时包含，OR/|=任一包含，"引号"=精确短语。
-    """
-    keyword = (keyword or "").strip()
-    if not keyword:
-        return {"rows": [], "total": 0}
-    groups = parse_smart_query(keyword)
-    if not groups:
-        return {"rows": [], "total": 0}
-    is_unlimited = not limit or limit <= 0
-    qlimit = 500000 if is_unlimited else limit
-    dbs = _shard_dbs()
-    all_rows = []
-    seen: set = set()  # rpid 去重（重采视频会导致 D/E/小仓出现同一条）
-    failed: list = []
-    def _add(rows: list) -> None:
-        for r in rows:
-            k = r.get("rpid")
-            if k in seen:
-                continue
-            seen.add(k)
-            all_rows.append(r)
-    # D 写缓冲优先（全文索引，最快，先画首屏；以前只在 E 零命中才查 D）
-    try:
-        rows = _search_one_db("bilibili_data", "write", keyword, start, end, exclude, qlimit, groups=groups, min_like=min_like)
-        _add(rows)
-        if progress_cb:
-            try: progress_cb("D缓冲", rows)
-            except Exception: pass
-    except Exception as exc:
-        failed.append(f"D缓冲:{exc}")
-        logger.warning("搜评论 D缓冲 跳过: %s", exc)
-    for db in dbs:
-        if _uid_same_dsn() and db == "bilibili_data":
-            continue  # 单库模式：D 与 E 主库同一物理库，避免重复
-        try:
-            rows = _search_one_db(db, "read", keyword, start, end, exclude, qlimit, groups=groups, min_like=min_like)
-            _add(rows)
-            if progress_cb:
-                try: progress_cb(db, rows)
-                except Exception: pass
-        except Exception as exc:
-            failed.append(f"{db}:{exc}")
-            logger.warning("搜评论 %s 跳过: %s", db, exc)
-    all_rows.sort(key=lambda r: r.get("ctime") or "", reverse=True)
-    out = {"rows": all_rows, "total": len(all_rows)} if is_unlimited else \
-        {"rows": all_rows[:limit], "total": None if len(all_rows) > limit else len(all_rows)}
-    if failed:
-        out["failed"] = failed
-    return out
 
 
-def _exclude_likes_danmaku(exclude: str) -> tuple[str, list]:
-    """同 _exclude_likes，但针对弹幕表别名 d。"""
-    words = [w.strip() for w in (exclude or "").split(",") if w.strip()]
-    conds, params = [], []
-    for w in words:
-        conds.append(" AND d.content NOT LIKE %s")
-        params.append("%" + _like_esc(w) + "%")
-    return "".join(conds), params
 
 
-def _search_danmaku_one_db(db: str, role: str, groups: list[list[str]], start: str, end: str,
-                           exclude: str, limit: int) -> list[dict]:
-    """单个物理库内搜弹幕（表名带库前缀，同库内 JOIN）。"""
-    import pymysql
-
-    from config import get_config
-    cfg = get_config()
-    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
-    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
-                           password=base["password"], database=db, charset=base["charset"],
-                           cursorclass=pymysql.cursors.DictCursor,
-                           connect_timeout=5, read_timeout=120)
-    try:
-        with conn.cursor() as cur:
-            kw_list = flatten_smart_query(groups)
-            cond, params = _dt_cond("d.ctime", start, end)
-            excl, excl_params = _exclude_likes_danmaku(exclude)
-            cols = ("t.id, t.uid, t.mid_hash, u.uname, t.content, t.progress, "
-                    "t.ctime, t.video_aid, v.bvid, v.title, v.owner_name")
-            if len(groups) > 1:
-                # OR 查询：内容 OR 条件 + 发送者标识兜底（取首词）
-                smart_where, smart_params = _like_cond_smart("d", groups)
-                cols_d = cols.replace("t.", "d.")
-                uid_pat = "%" + _like_esc(groups[0][0]) + "%"
-                where = ("1=1" + smart_where + cond + excl)
-                uid_where = ("(d.mid_hash LIKE %s OR d.uid LIKE %s)"
-                             + cond + excl)
-                sql = (
-                    f"SELECT {cols_d} FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    f"WHERE {where} "
-                    "UNION "
-                    "SELECT d.id, d.uid, d.mid_hash, u.uname, d.content, "
-                    "d.progress, d.ctime, d.video_aid, "
-                    "v.bvid, v.title, v.owner_name "
-                    f"FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    f"WHERE {uid_where} "
-                    "ORDER BY ctime DESC LIMIT %s"
-                )
-                cur.execute(sql, [*smart_params, *params, *excl_params,
-                                   uid_pat, uid_pat, *params, *excl_params,
-                                   limit])
-            elif len(kw_list) == 1 and _ft_usable(kw_list[0]):
-                # 单关键词 FULLTEXT（原有逻辑）
-                term = _ft_term(kw_list[0])
-                sub_lim = limit * 5 + 5
-                inner_cols = ("d.id, d.uid, d.mid_hash, d.content, d.progress, "
-                              "d.ctime, d.video_aid")
-                inner = (
-                    f"SELECT {inner_cols} FROM `{db}`.raw_danmaku d "
-                    "WHERE MATCH(d.content) AGAINST(%s IN BOOLEAN MODE)"
-                    + cond + excl + " "
-                    "LIMIT %s"
-                )
-                sql = (
-                    "(SELECT " + cols + " FROM (" + inner + ") t "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = t.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = t.uid) "
-                    "UNION "
-                    "(SELECT d.id, d.uid, d.mid_hash, u.uname, d.content, "
-                    "d.progress, d.ctime, d.video_aid, "
-                    "v.bvid, v.title, v.owner_name "
-                    f"FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    "WHERE (d.mid_hash LIKE %s OR d.uid LIKE %s)"
-                    + cond + excl + " "
-                    "ORDER BY d.ctime DESC LIMIT %s) "
-                    "ORDER BY ctime DESC LIMIT %s"
-                )
-                pat = "%" + _like_esc(kw_list[0]) + "%"
-                cur.execute(sql, [term, *params, *excl_params, sub_lim,
-                                  pat, pat, *params, *excl_params, sub_lim,
-                                  limit + 1])
-            elif len(kw_list) >= 2:
-                # 多关键词：内容 ALL LIKE + mid_hash/uid 兜底
-                like_where, like_params = _multi_like_cond("d", kw_list)
-                cols_d = cols.replace("t.", "d.")
-                # mid_hash/uid 搜第一个关键词（通常用户搜的是同一个人）
-                uid_pat = "%" + _like_esc(kw_list[0]) + "%"
-                where = ("1=1" + like_where + cond + excl)
-                uid_where = ("(d.mid_hash LIKE %s OR d.uid LIKE %s)"
-                             + cond + excl)
-                sql = (
-                    f"SELECT {cols_d} FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    f"WHERE {where} "
-                    "UNION "
-                    "SELECT d.id, d.uid, d.mid_hash, u.uname, d.content, "
-                    "d.progress, d.ctime, d.video_aid, "
-                    "v.bvid, v.title, v.owner_name "
-                    f"FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    f"WHERE {uid_where} "
-                    "ORDER BY ctime DESC LIMIT %s"
-                )
-                cur.execute(sql, [*like_params, *params, *excl_params,
-                                  uid_pat, uid_pat, *params, *excl_params,
-                                  limit + 1])
-            else:
-                # 单字关键词 LIKE 路径
-                pat = "%" + _like_esc(kw_list[0]) + "%"
-                where = ("(d.content LIKE %s OR d.mid_hash LIKE %s "
-                         "OR d.uid LIKE %s)" + cond + excl)
-                cols_d = cols.replace("t.", "d.")
-                sql = (
-                    f"SELECT {cols_d} FROM `{db}`.raw_danmaku d "
-                    f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
-                    f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
-                    f"WHERE {where} "
-                    "ORDER BY d.ctime DESC LIMIT %s"
-                )
-                cur.execute(sql, [pat, pat, pat, *params, *excl_params,
-                                  limit + 1])
-            rows = list(cur.fetchall())
-            # LIMIT+1 探测截断：多 1 条说明还有更多
-            return rows
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
-def search_danmaku(keyword: str, *, start: str = "", end: str = "",
-                   exclude: str = "", limit: int = 100) -> dict:
-    """跨库搜弹幕（ngram 全文索引）或发送者标识（mid_hash/uid LIKE）。
-
-    D 缓冲 + E 各仓逐库查，Python 按时间归并、按 id 去重。
-    查询语法同 search_comments：空格/逗号=同时包含，OR/|=任一包含，"引号"=精确短语。
-    """
-    keyword = (keyword or "").strip()
-    if not keyword:
-        return {"rows": [], "total": 0}
-    groups = parse_smart_query(keyword)
-    if not groups:
-        return {"rows": [], "total": 0}
-    is_unlimited = not limit or limit <= 0
-    qlimit = 500000 if is_unlimited else limit
-    # 每库多取 1 条做截断探测（与旧单库语义一致）
-    per_db = qlimit + 1
-    all_rows: list[dict] = []
-    seen: set = set()
-    failed: list = []
-    def _add(rows: list) -> None:
-        for r in rows:
-            k = r.get("id")
-            if k in seen:
-                continue
-            seen.add(k)
-            all_rows.append(r)
-    try:
-        _add(_search_danmaku_one_db("bilibili_data", "write", groups, start, end, exclude, per_db))
-    except Exception as exc:
-        failed.append(f"D缓冲:{exc}")
-        logger.warning("搜弹幕 D缓冲 跳过: %s", exc)
-    for db in (_shard_dbs() or ["bilibili_data"]):
-        if _uid_same_dsn() and db == "bilibili_data":
-            continue
-        try:
-            _add(_search_danmaku_one_db(db, "read", groups, start, end, exclude, per_db))
-        except Exception as exc:
-            failed.append(f"{db}:{exc}")
-            logger.warning("搜弹幕 %s 跳过: %s", db, exc)
-    all_rows.sort(key=lambda r: r.get("ctime") or "", reverse=True)
-    out = {"rows": all_rows, "total": len(all_rows)} if is_unlimited else \
-        {"rows": all_rows[:limit], "total": None if len(all_rows) > limit else len(all_rows)}
-    if failed:
-        out["failed"] = failed
-    return out
 
 
-def _iter_search_one_db(db: str, role: str, groups: list[list[str]], *, table: str, id_col: str,
-                        alias: str, cols: str, start: str = "", end: str = "",
-                        exclude: str = "", page: int = 5000, min_like: int = 0) -> Iterable[dict]:
-    """单个物理库内流式导出搜索命中全部行（keyset 分页，无深偏移）。
-
-    按 (ctime, 主键) 倒序翻页，ctime 撞车用主键兜底保证不重不漏。
-    """
-    import pymysql
-
-    from config import get_config
-    cfg = get_config()
-    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
-    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
-                           password=base["password"], database=db, charset=base["charset"],
-                           cursorclass=pymysql.cursors.DictCursor,
-                           connect_timeout=5, read_timeout=300)
-    try:
-        with conn.cursor() as cur:
-            cond, params = _dt_cond(f"{alias}.ctime", start, end)
-            if alias == "d":
-                excl, excl_params = _exclude_likes_danmaku(exclude)
-            else:
-                excl, excl_params = _exclude_likes(exclude)
-            smart_where, smart_params = _like_cond_smart(alias, groups)
-            like_cond = ""
-            like_params: list = []
-            if alias == "c" and min_like and min_like > 0:
-                like_cond = f" AND {alias}.like_num >= %s"
-                like_params = [int(min_like)]
-            last_ctime = None
-            last_id = None
-            while True:
-                params_batch = list(smart_params) + list(params) + list(excl_params) + list(like_params)
-                if last_ctime is not None:
-                    sql = (
-                        f"SELECT {cols} FROM `{db}`.{table} {alias} "
-                        f"LEFT JOIN `{db}`.meta_video v ON v.aid = " + alias + ".video_aid "
-                        f"LEFT JOIN `{db}`.dim_user u ON u.uid = " + alias + ".uid "
-                        f"WHERE 1=1 {smart_where}"
-                        + cond + excl + like_cond +
-                        f" AND ({alias}.ctime, {alias}.{id_col}) < (%s, %s) "
-                        f"ORDER BY {alias}.ctime DESC, {alias}.{id_col} DESC LIMIT %s"
-                    )
-                    args = [*params_batch, last_ctime, last_id, page]
-                else:
-                    sql = (
-                        f"SELECT {cols} FROM `{db}`.{table} {alias} "
-                        f"LEFT JOIN `{db}`.meta_video v ON v.aid = " + alias + ".video_aid "
-                        f"LEFT JOIN `{db}`.dim_user u ON u.uid = " + alias + ".uid "
-                        f"WHERE 1=1 {smart_where}"
-                        + cond + excl + like_cond +
-                        f" ORDER BY {alias}.ctime DESC, {alias}.{id_col} DESC LIMIT %s"
-                    )
-                    args = [*params_batch, page]
-                cur.execute(sql, args)
-                rows = list(cur.fetchall())
-                if not rows:
-                    break
-                yield from rows
-                if len(rows) < page:
-                    break
-                last = rows[-1]
-                last_ctime = last["ctime"]
-                last_id = last[id_col]
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
-def _iter_search_all_dbs(groups: list[list[str]], *, table: str, id_col: str,
-                         alias: str, cols: str, start: str = "", end: str = "",
-                         exclude: str = "", page: int = 5000, min_like: int = 0) -> Iterable[dict]:
-    """跨库流式导出：D 缓冲 + E 各仓逐库 keyset 翻页，按主键去重。"""
-    seen: set = set()
-    targets: list[tuple[str, str]] = [("bilibili_data", "write")]
-    try:
-        from config import get_config
-        cfg = get_config()
-        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
-        targets = [(d_db, "write")]
-        for db in (_shard_dbs() or ["bilibili_data"]):
-            if _uid_same_dsn() and db == d_db:
-                continue
-            targets.append((db, "read"))
-    except Exception:
-        pass
-    for db, role in targets:
-        try:
-            for r in _iter_search_one_db(db, role, groups, table=table, id_col=id_col,
-                                         alias=alias, cols=cols, start=start, end=end,
-                                         exclude=exclude, page=page, min_like=min_like):
-                k = r.get(id_col)
-                if k in seen:
-                    continue
-                seen.add(k)
-                yield r
-        except Exception as exc:
-            logger.warning("导出流 %s(%s) 跳过: %s", db, role, exc)
 
 
-def iter_search_comments(keyword: str, *, start: str = "", end: str = "",
-                         exclude: str = "", page: int = 5000, min_like: int = 0) -> Iterable[dict]:
-    """流式导出全部命中评论（跨库 keyset 分页），字段同 search_comments 内容分支。"""
-    cols = ("c.rpid, c.uid, u.uname, c.content, c.like_num, c.ctime, "
-            "c.ip_location, c.video_aid, v.bvid, v.title, "
-            "v.owner_uid, v.owner_name")
-    groups = parse_smart_query(keyword)
-    if not groups:
-        return
-        yield  # 保持生成器语义
-    yield from _iter_search_all_dbs(groups, table="raw_comments", id_col="rpid", alias="c",
-                                    cols=cols, start=start, end=end,
-                                    exclude=exclude, page=page, min_like=min_like)
 
 
-def iter_search_danmaku(keyword: str, *, start: str = "", end: str = "",
-                        exclude: str = "", page: int = 5000) -> Iterable[dict]:
-    """流式导出全部命中弹幕（跨库 keyset 分页）。"""
-    cols = ("d.id, d.uid, d.mid_hash, u.uname, d.content, d.progress, "
-            "d.ctime, d.video_aid, v.bvid, v.title, v.owner_name")
-    groups = parse_smart_query(keyword)
-    if not groups:
-        return
-        yield  # 保持生成器语义
-    yield from _iter_search_all_dbs(groups, table="raw_danmaku", id_col="id", alias="d",
-                                    cols=cols, start=start, end=end,
-                                    exclude=exclude, page=page)
 
 
-def _video_match_cond(groups: list[list[str]]) -> tuple[str, list]:
-    """视频匹配条件：组内词 AND、组间 OR；每词命中标题/BV/UP 任一字段。"""
-    parts, params = [], []
-    for terms in groups:
-        conds = []
-        for kw in terms:
-            pat = "%" + _like_esc(kw) + "%"
-            conds.append("(v.title LIKE %s OR v.bvid LIKE %s "
-                         "OR v.owner_name LIKE %s OR v.owner_uid LIKE %s)")
-            params.extend([pat] * 4)
-        parts.append("(" + " AND ".join(conds) + ")")
-    return "(" + " OR ".join(parts) + ")", params
 
 
-def _search_videos_one_db(db: str, role: str, groups: list[list[str]], start: str, end: str,
-                          limit: int) -> list[dict]:
-    """单个物理库内搜视频（含库内评论/弹幕计数）。"""
-    import pymysql
-
-    from config import get_config
-    cfg = get_config()
-    base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
-    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
-                           password=base["password"], database=db, charset=base["charset"],
-                           cursorclass=pymysql.cursors.DictCursor,
-                           connect_timeout=5, read_timeout=120)
-    try:
-        with conn.cursor() as cur:
-            where_content, all_params = _video_match_cond(groups)
-            conditions = [where_content]
-            params: list = list(all_params)
-            if start:
-                conditions.append("FROM_UNIXTIME(v.pubdate) >= %s")
-                params.append(start)
-            if end:
-                conditions.append("FROM_UNIXTIME(v.pubdate) <= %s")
-                params.append(end)
-            where = " AND ".join(conditions)
-            cur.execute(
-                f"SELECT v.aid, v.bvid, v.title, v.owner_uid, v.owner_name, v.pubdate, "
-                f"       v.part "
-                f"FROM `{db}`.meta_video v "
-                f"WHERE {where} "
-                "ORDER BY v.pubdate DESC LIMIT %s",
-                [*params, limit + 1])
-            videos = list(cur.fetchall())
-            aids = [int(v["aid"]) for v in videos if v.get("aid")]
-            cc: dict = {}
-            dc: dict = {}
-            if aids:
-                fmt = ",".join(["%s"] * len(aids))
-                cur.execute(
-                    f"SELECT video_aid AS aid, COUNT(*) AS n FROM `{db}`.raw_comments "
-                    f"WHERE video_aid IN ({fmt}) GROUP BY video_aid", tuple(aids))
-                cc = {int(r["aid"]): int(r["n"]) for r in cur.fetchall()}
-                cur.execute(
-                    f"SELECT video_aid AS aid, COUNT(*) AS n FROM `{db}`.raw_danmaku "
-                    f"WHERE video_aid IN ({fmt}) GROUP BY video_aid", tuple(aids))
-                dc = {int(r["aid"]): int(r["n"]) for r in cur.fetchall()}
-            for v in videos:
-                v["comment_count"] = cc.get(int(v.get("aid") or 0), 0)
-                v["danmaku_count"] = dc.get(int(v.get("aid") or 0), 0)
-            return videos
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
-def search_videos(keyword: str, *, start: str = "", end: str = "",
-                  limit: int = 50) -> dict:
-    """跨库搜视频（标题/BV/UP昵称/UP UID 匹配），D 缓冲 + E 各仓合并去重。
 
-    查询语法：空格/逗号=同时包含，OR/|=任一包含，"引号"=精确短语。
-    """
-    keyword = (keyword or "").strip()
-    if not keyword:
-        return {"rows": [], "total": 0}
-    groups = parse_smart_query(keyword)
-    if not groups:
-        return {"rows": [], "total": 0}
-    is_unlimited = not limit or limit <= 0
-    qlimit = 500000 if is_unlimited else limit
-    all_videos: list[dict] = []
-    seen: set = set()
-    failed: list = []
-    def _add(videos: list) -> None:
-        for v in videos:
-            k = (v.get("aid"), v.get("part", 1))
-            if k in seen:
-                continue
-            seen.add(k)
-            all_videos.append(v)
-    try:
-        _add(_search_videos_one_db("bilibili_data", "write", groups, start, end, qlimit))
-    except Exception as exc:
-        failed.append(f"D缓冲:{exc}")
-        logger.warning("搜视频 D缓冲 跳过: %s", exc)
-    for db in (_shard_dbs() or ["bilibili_data"]):
-        if _uid_same_dsn() and db == "bilibili_data":
-            continue
-        try:
-            _add(_search_videos_one_db(db, "read", groups, start, end, qlimit))
-        except Exception as exc:
-            failed.append(f"{db}:{exc}")
-            logger.warning("搜视频 %s 跳过: %s", db, exc)
-    all_videos.sort(key=lambda v: int(v.get("pubdate") or 0), reverse=True)
-    if is_unlimited:
-        out = {"rows": all_videos, "total": len(all_videos)}
-    else:
-        out = {"rows": all_videos[:limit],
-               "total": None if len(all_videos) > limit else len(all_videos)}
-    if failed:
-        out["failed"] = failed
-    return out
 
 
 # ---------------- 排行榜 ----------------
 
-def _time_cond(alias: str, start: str, end: str) -> tuple[str, tuple]:
-    """时间范围条件（与 _dt_cond 相同语义，供排行榜复用）。"""
-    cond, params = "", []
-    if start:
-        cond += f" AND {alias} >= %s"
-        params.append(start)
-    if end:
-        cond += f" AND {alias} <= %s"
-        params.append(end)
-    return cond, params
 
 
-def get_rankings(*, start: str = "", end: str = "", top: int = 100,
-                 min_text_len: int = 0, progress_cb=None, stop_event=None,
-                 which: list[str] | None = None,
-                 rank_done_cb=None) -> dict:
-    """跨 E 全 shard 聚合排行榜：逐榜完成逐榜回调。
-
-    which: 要跑的榜名列表，None = 全部5榜。
-    rank_done_cb(key, rows): 每个榜跑完立即回调（可逐个落缓存+逐个显示）。
-    progress_cb(done, total) 每完成一榜回调。
-    stop_event 可选：置位后查完当前仓即停（抛 StatsCancelled，调用方按取消处理）。
-    """
-    tc, tp = _time_cond("c.ctime", start, end)
-    out: dict[str, list[dict]] = {}
-    done_count = [0]
-    total_jobs = [0]  # jobs 建好后赋值（_report 调用时已就绪）
-    lock = threading.Lock()
-
-    def _report():
-        with lock:
-            done_count[0] += 1
-            if progress_cb:
-                try: progress_cb(done_count[0], total_jobs[0])
-                except Exception: pass
-
-    def _query_shard(db, sql, params):
-        """单仓查询，返回 rows（线程复用连接，跨榜只建连一次）。"""
-        try:
-            conn = _rcached("archive", db, 180)
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                return list(cur.fetchall())
-        except Exception:
-            _drop_cached("archive", db, 180)
-            raise
-
-    def _merge_users(all_rows):
-        merged = {}
-        for r in all_rows:
-            uid = int(r["uid"]); cnt = int(r["cnt"])
-            if uid in merged:
-                merged[uid]["cnt"] += cnt
-            else:
-                merged[uid] = {"uid": uid, "uname": r.get("uname") or str(uid), "cnt": cnt}
-        lst = sorted(merged.values(), key=lambda x: x["cnt"], reverse=True)
-        return lst[:100]
-
-    def _merge_videos(all_rows):
-        merged = {}
-        for r in all_rows:
-            aid = int(r["aid"]); cnt = int(r["cnt"])
-            if aid in merged:
-                merged[aid]["cnt"] += cnt
-            else:
-                merged[aid] = {"aid": aid, "bvid": r.get("bvid"), "title": r.get("title"),
-                               "owner_name": r.get("owner_name"), "cnt": cnt}
-        lst = sorted(merged.values(), key=lambda x: x["cnt"], reverse=True)
-        return lst[:100]
-
-    def _merge_ups(all_rows):
-        merged = {}
-        for r in all_rows:
-            uid = int(r["uid"]); cnt = int(r["cnt"])
-            if uid in merged:
-                merged[uid]["cnt"] += cnt
-            else:
-                merged[uid] = {"uid": uid, "uname": r.get("uname") or "", "cnt": cnt}
-        lst = sorted(merged.values(), key=lambda x: x["cnt"], reverse=True)
-        return lst[:100]
-
-    def _merge_texts(all_rows):
-        merged = {}
-        for r in all_rows:
-            content = r["content"]; cnt = int(r["cnt"])
-            if content in merged:
-                merged[content]["cnt"] += cnt
-                merged[content]["senders"] = max(merged[content].get("senders", 0),
-                                                  int(r.get("senders", 0) or 0))
-            else:
-                merged[content] = {"content": content, "cnt": cnt,
-                                   "senders": int(r.get("senders", 0) or 0),
-                                   "tlen": int(r.get("tlen", 0) or 0)}
-        lst = sorted(merged.values(), key=lambda x: x["cnt"], reverse=True)
-        return lst[:100]
-
-    # 5 榜定义（必须放在 _merge_* 之后，字典求值时它们已存在）
-    all_jobs = {
-        "top_users": (
-            "SELECT t.uid, MAX(COALESCE(u.uname, CAST(t.uid AS CHAR))) AS uname, t.cnt "
-            "FROM (SELECT c.uid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.uid > 0 GROUP BY c.uid ORDER BY cnt DESC LIMIT %s) t "
-            "LEFT JOIN dim_user u ON u.uid = t.uid GROUP BY t.uid, t.cnt ORDER BY t.cnt DESC",
-            [top], _merge_users),
-        "top_texts": (
-            "SELECT content, COUNT(*) AS cnt, COUNT(DISTINCT uid) AS senders, "
-            "CHAR_LENGTH(content) AS tlen FROM raw_comments "
-            "WHERE content IS NOT NULL AND content != '' "
-            "AND ctime >= DATE_SUB(NOW(), INTERVAL 30 DAY) "
-            + (" AND CHAR_LENGTH(content) >= %s" if min_text_len > 0 else "")
-            + " GROUP BY content ORDER BY cnt DESC LIMIT %s",
-            [*([min_text_len] if min_text_len > 0 else []), top], _merge_texts),
-        "top_liked": (
-            "SELECT c.rpid, c.uid, COALESCE(u.uname,'') AS uname, c.content, "
-            "c.like_num, c.ctime, c.ip_location, v.bvid, v.title, v.owner_name "
-            "FROM raw_comments c LEFT JOIN dim_user u ON u.uid=c.uid "
-            "LEFT JOIN meta_video v ON v.aid=c.video_aid "
-            "WHERE c.like_num > 0 ORDER BY c.like_num DESC LIMIT %s",
-            [top], lambda rows: sorted(rows, key=lambda x: int(x.get("like_num",0) or 0), reverse=True)[:100]),
-        "top_videos": (
-            "SELECT t.aid, v.bvid, v.title, v.owner_name, t.cnt "
-            "FROM (SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.video_aid > 0 GROUP BY c.video_aid ORDER BY cnt DESC LIMIT %s) t "
-            "LEFT JOIN meta_video v ON v.aid=t.aid ORDER BY t.cnt DESC",
-            [top], _merge_videos),
-        "top_ups": (
-            "SELECT v.owner_uid AS uid, MAX(COALESCE(v.owner_name,'')) AS uname, "
-            "SUM(g.cnt) AS cnt FROM "
-            "(SELECT c.video_aid AS aid, COUNT(*) AS cnt FROM raw_comments c "
-            "WHERE c.video_aid > 0 GROUP BY c.video_aid) g "
-            "JOIN meta_video v ON v.aid=g.aid WHERE v.owner_uid > 0 "
-            "GROUP BY v.owner_uid ORDER BY cnt DESC LIMIT %s",
-            [top], _merge_ups),
-    }
-    jobs = [(k, *all_jobs[k]) for k in (which or list(all_jobs.keys()))]
-    total_jobs[0] = len(jobs)
-
-    def _run_ranking(key, sql, params, merge_fn):
-        """单榜：串行跑全仓，合并结果；取消时查完当前仓即停"""
-        import time as _time
-        dbs = _shard_dbs()
-        all_rows = []
-        for db in dbs:
-            if stop_event is not None and stop_event.is_set():
-                raise StatsCancelled()
-            try:
-                _t0 = _time.monotonic()
-                rows = _query_shard(db, sql, params)
-                all_rows.extend(rows)
-                _dt = _time.monotonic() - _t0
-                if _dt > 10:
-                    logger.warning("排行榜 %s 仓 %s 耗时 %.0fs（行数 %s）", key, db, _dt, len(rows))
-            except StatsCancelled:
-                raise
-            except Exception:
-                continue
-        out[key] = merge_fn(all_rows)
-
-    def _worker(key, sql, params, merge_fn):
-        try:
-            _run_ranking(key, sql, params, merge_fn)
-        except StatsCancelled:
-            raise
-        except Exception as exc:
-            out[key] = []
-            logger.warning("排行榜 %s 失败: %s", key, exc)
-        finally:
-            _report()
-            if rank_done_cb:
-                try:
-                    rank_done_cb(key, out.get(key, []))
-                except Exception:
-                    pass
-
-    # 串行跑选中的榜（HDD 上多榜并行寻道打架）
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        futs = [pool.submit(_worker, key, sql, params, merge_fn)
-                for key, sql, params, merge_fn in jobs]
-        cancelled = False
-        for f in futs:
-            try:
-                f.result()
-            except StatsCancelled:
-                cancelled = True
-            except Exception as exc:
-                logger.warning("排行榜 worker 异常: %s", exc)
-    if cancelled and (stop_event is not None and stop_event.is_set()):
-        raise StatsCancelled()
-    return out
 
 
 # ---------------- 趋势轻量查询（统计 V2：失败只降级为空，不抛异常） ----------------
 
-def get_daily_comment_counts(days: int = 30) -> list[dict]:
-    """近 N 天每日评论量（跨 D+E 各仓求和，失败的仓跳过）。
+# ---- 子模块重导出：保持 dao.<name>() 调用与 monkeypatch 目标不变 ----
+from storage.dao.rankings import (  # noqa: E402
+    get_daily_comment_counts,
+    get_hourly_comment_counts,
+    get_rankings,
+)
+from storage.dao.search import (  # noqa: E402
+    flatten_smart_query,
+    iter_search_comments,
+    iter_search_danmaku,
+    parse_smart_query,
+    search_comments,
+    search_danmaku,
+    search_videos,
+)
 
-    返回 [{"day": "YYYY-MM-DD", "cnt": n}]（缺失日期补 0，保证定长）。
-    统计 V2 趋势图用；任何异常只记日志并返回已有数据，不抛。
-    """
-    import datetime as _dt
-
-    days = max(1, min(365, int(days or 30)))
-    today = _dt.date.today()
-    base = {str(today - _dt.timedelta(days=i)): 0 for i in range(days - 1, -1, -1)}
-    start = str(today - _dt.timedelta(days=days - 1))
-    targets: list[tuple[str, str]] = []
-    try:
-        from config import get_config
-        cfg = get_config()
-        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
-        targets.append((d_db, "write"))
-        for db in (_shard_dbs() or ["bilibili_data"]):
-            if _uid_same_dsn() and db == d_db:
-                continue
-            targets.append((db, "read"))
-    except Exception:
-        targets = [("bilibili_data", "read")]
-    for db, role in targets:
-        try:
-            import pymysql
-
-            from config import get_config
-            cfg = get_config()
-            base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",
-                               cfg.mysql)
-            conn = pymysql.connect(host=base_cfg["host"], port=base_cfg["port"],
-                                   user=base_cfg["user"], password=base_cfg["password"],
-                                   database=db, charset=base_cfg["charset"],
-                                   cursorclass=pymysql.cursors.DictCursor,
-                                   connect_timeout=5, read_timeout=60)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT DATE(ctime) AS d, COUNT(*) AS n FROM `{db}`.raw_comments "
-                        "WHERE ctime >= %s GROUP BY DATE(ctime)", (start,))
-                    for r in cur.fetchall():
-                        k = str(r.get("d") or "")
-                        if k in base:
-                            base[k] += int(r.get("n") or 0)
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as exc:
-            logger.warning("每日评论量 %s(%s) 跳过: %s", db, role, exc)
-    return [{"day": k, "cnt": base[k]} for k in sorted(base)]
-
-
-def get_hourly_comment_counts() -> list[dict]:
-    """24 小时评论分布（跨 D+E 各仓求和，失败的仓跳过）。
-
-    返回 [{"hour": 0..23, "cnt": n}]，统计 V2 时段分布图用。
-    """
-    cnt = [0] * 24
-    targets: list[tuple[str, str]] = []
-    try:
-        from config import get_config
-        cfg = get_config()
-        d_db = getattr(cfg, "mysql_write", cfg.mysql)["database"]
-        targets.append((d_db, "write"))
-        for db in (_shard_dbs() or ["bilibili_data"]):
-            if _uid_same_dsn() and db == d_db:
-                continue
-            targets.append((db, "read"))
-    except Exception:
-        targets = [("bilibili_data", "read")]
-    for db, role in targets:
-        try:
-            import pymysql
-
-            from config import get_config
-            cfg = get_config()
-            base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",
-                               cfg.mysql)
-            conn = pymysql.connect(host=base_cfg["host"], port=base_cfg["port"],
-                                   user=base_cfg["user"], password=base_cfg["password"],
-                                   database=db, charset=base_cfg["charset"],
-                                   cursorclass=pymysql.cursors.DictCursor,
-                                   connect_timeout=5, read_timeout=60)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT HOUR(ctime) AS h, COUNT(*) AS n FROM `{db}`.raw_comments "
-                        "GROUP BY HOUR(ctime)")
-                    for r in cur.fetchall():
-                        try:
-                            h = int(r.get("h"))
-                        except (TypeError, ValueError):
-                            continue
-                        if 0 <= h < 24:
-                            cnt[h] += int(r.get("n") or 0)
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as exc:
-            logger.warning("小时分布 %s(%s) 跳过: %s", db, role, exc)
-    return [{"hour": h, "cnt": cnt[h]} for h in range(24)]
+# 显式声明对外契约：既含本模块定义，也含从子模块重导出的名字。
+# 这既是文档也是给 ruff 的信号——重导出是有意的，不是死导入。
+__all__ = [
+    # 基础设施 / 共享状态（自 _core 重导出）
+    "StatsCancelled", "_SHARD_CACHE", "_SHARD_TTL", "_drop_cached",
+    "_open_conn", "_rcached", "_rclose_all", "_shard_dbs", "_shard_dbs_trusted",
+    "_tls", "_uid_same_dsn", "logger",
+    # 搜索子系统（自 search 重导出）
+    "parse_smart_query", "flatten_smart_query", "search_comments", "search_danmaku",
+    "search_videos", "iter_search_comments", "iter_search_danmaku",
+    # 榜单与趋势（自 rankings 重导出）
+    "get_rankings", "get_daily_comment_counts", "get_hourly_comment_counts",
+]

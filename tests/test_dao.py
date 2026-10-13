@@ -1,4 +1,4 @@
-"""storage/dao.py 关键写入路径单元测试（不连 MySQL）。
+"""storage/dao 包关键写入路径单元测试（不连 MySQL）。
 
 聚焦数据正确性风险最高的部分：
 - upsert_* 的字段顺序 / 默认值 / 空输入短路
@@ -169,3 +169,47 @@ def test_add_global_comment_uids_e_offline_returns_zero(monkeypatch):
 
     monkeypatch.setattr(dao, "_r_strict", _boom)
     assert dao.add_global_comment_uids([1, 2, 3]) == 0
+
+
+# ---------- 拆包契约 ----------
+
+def test_dao_package_exposes_public_api():
+    """dao 已由单文件拆为包；此测试守卫对外契约，防止重导出遗漏。
+
+    所有外部调用（含 GUI/采集/分析）都走 `from storage import dao; dao.x()`，
+    一旦某名字漏重导出，这里会立刻失败。
+    """
+    required = [
+        # 写入路径
+        "upsert_video", "upsert_danmaku", "upsert_comments", "upsert_users",
+        "upsert_posts", "upsert_up_stat", "update_progress",
+        # 全局去重直播喂数
+        "add_global_comment_uids", "add_global_users",
+        # 查询
+        "query_comments_by_uid", "query_danmaku_by_uid", "query_user",
+        "query_recent_videos", "query_comments_by_video", "query_danmaku_by_video",
+        "find_video_by_bvid", "get_progress", "get_progress_batch",
+        # 统计 / 榜单 / 趋势（自 rankings 子模块重导出）
+        "get_collection_stats", "get_rankings",
+        "get_daily_comment_counts", "get_hourly_comment_counts",
+        # 搜索（自 search 子模块重导出）
+        "parse_smart_query", "flatten_smart_query",
+        "search_comments", "search_danmaku", "search_videos",
+        "iter_search_comments", "iter_search_danmaku",
+        # 基础设施 / 状态（自 _core 重导出，含 monkeypatch 目标）
+        "_w", "_r", "_r_strict", "_executemany", "_rcached", "_drop_cached",
+        "_shard_dbs", "_uid_same_dsn", "_SHARD_CACHE", "_tls", "logger",
+        "EArchiveOfflineError", "StatsCancelled",
+    ]
+    missing = [n for n in required if not hasattr(dao, n)]
+    assert not missing, f"dao 包缺少重导出: {missing}"
+
+
+def test_search_and_rankings_live_in_submodules():
+    """确认拆包落地：search/rankings 符号来自子模块（而非 __init__ 定义）。"""
+    import storage.dao.rankings as rankings
+    import storage.dao.search as search
+
+    assert dao.get_rankings is rankings.get_rankings
+    assert dao.search_comments is search.search_comments
+    assert dao.get_hourly_comment_counts is rankings.get_hourly_comment_counts
