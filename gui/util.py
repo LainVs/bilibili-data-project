@@ -2,8 +2,52 @@
 from __future__ import annotations
 
 import datetime
+import logging
+import re
 
 from storage import dao
+
+logger = logging.getLogger(__name__)
+
+_BV_RE = re.compile(r"(?<![0-9a-zA-Z])(BV1[0-9A-Za-z]{9})(?![0-9a-zA-Z])", re.IGNORECASE)
+_SHORTLINK_RE = re.compile(r"https?://(?:b23\.tv|bili2233\.cn)/[0-9A-Za-z]+")
+
+
+def extract_bvid(text: str) -> str:
+    """从任意文本中**离线**提取 BV 号（纯正则，不发起网络请求）。
+
+    支持：裸 BV 号、含 BV 的链接/文案。若只有 b23.tv 短链而无 BV，
+    返回空串——短链需联网解析，请用 resolve_short_link()（放后台线程调）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    m = _BV_RE.search(text)
+    if m:
+        return "BV" + m.group(1)[2:]
+    return ""
+
+
+def find_short_link(text: str) -> str:
+    """从文本中找出 b23.tv / bili2233.cn 短链，没有则返回空串。"""
+    m = _SHORTLINK_RE.search(text or "")
+    return m.group(0) if m else ""
+
+
+def resolve_short_link(url: str) -> str:
+    """联网解析短链得到 BV 号（**阻塞，必须在后台线程调用**）。
+
+    失败或无法提取时返回空串，绝不抛异常。
+    """
+    try:
+        import requests
+
+        resp = requests.head(url, allow_redirects=True, timeout=5,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        return extract_bvid(resp.url)
+    except Exception as exc:
+        logger.warning("短链解析失败 %s: %s", url, exc)
+        return ""
 
 
 def ping_main(widget, label: str) -> None:

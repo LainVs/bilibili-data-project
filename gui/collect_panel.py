@@ -687,6 +687,14 @@ class CollectPanel(ttk.Frame):
         else:
             bvid = self._extract_bvid(target)
             if not bvid:
+                # 可能是 b23.tv 短链：需联网解析。放后台线程，避免主线程
+                # requests.head(timeout=5) 冻结界面。
+                from gui.util import find_short_link
+
+                link = find_short_link(target)
+                if link:
+                    self._resolve_link_then_crawl(link)
+                    return
                 messagebox.showerror("错误", "无法识别 BV 号（示例：BV1xx4y1z7Ab）")
                 return
             from gui.crawl_worker import CrawlWorker
@@ -696,6 +704,40 @@ class CollectPanel(ttk.Frame):
                                  danmaku=self.var_danmaku.get())
             self.lbl_status.configure(text=f"采集中：{bvid} …")
 
+        self._launch_worker(worker)
+
+    def _resolve_link_then_crawl(self, link: str) -> None:
+        """后台解析 b23.tv 短链为 BV 后启动采集（主线程不阻塞）。"""
+        import threading
+
+        self.btn_start.configure(text="解析短链中…", state="disabled")
+        self.lbl_status.configure(text=f"正在解析短链：{link} …")
+
+        def _work() -> None:
+            from gui.util import resolve_short_link
+
+            bvid = resolve_short_link(link)
+
+            def _done() -> None:
+                self.btn_start.configure(text="开始采集", state="normal")
+                if not bvid:
+                    self.lbl_status.configure(text="短链解析失败")
+                    messagebox.showerror("错误", "短链解析失败，请改用完整 BV 号或稍后重试")
+                    return
+                from gui.crawl_worker import CrawlWorker
+
+                worker = CrawlWorker(self.msg_q, bvid=bvid,
+                                     comments=self.var_comments.get(),
+                                     danmaku=self.var_danmaku.get())
+                self.lbl_status.configure(text=f"采集中：{bvid} …")
+                self._launch_worker(worker)
+
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True, name="resolve-shortlink").start()
+
+    def _launch_worker(self, worker) -> None:
+        """统一启动 worker 并切到运行态（供直接启动与短链解析后复用）。"""
         self.worker = worker
         self.worker.start()
         self.btn_start.configure(text="停止采集", style="Danger.TButton", state="normal")
@@ -710,29 +752,17 @@ class CollectPanel(ttk.Frame):
 
     @staticmethod
     def _extract_bvid(text: str) -> str:
-        text = text.strip()
-        if not text:
-            return ""
-        import re
-        # 1. 优先正则提取形如 BV1xx4y1z7Ab（不受中文标点、前后粘连汉字影响）
-        m = re.search(r"(?<![0-9a-zA-Z])(BV1[0-9A-Za-z]{9})(?![0-9a-zA-Z])", text, re.IGNORECASE)
-        if m:
-            bvid = m.group(1)
-            return "BV" + bvid[2:]
-        # 2. b23.tv 短链解析 (跟随重定向提取真实 BV)
-        if "b23.tv" in text or "bili2233.cn" in text:
-            url_m = re.search(r"https?://(?:b23\.tv|bili2233\.cn)/[0-9A-Za-z]+", text)
-            if url_m:
-                try:
-                    import requests
-                    resp = requests.head(url_m.group(0), allow_redirects=True, timeout=5,
-                                         headers={"User-Agent": "Mozilla/5.0"})
-                    m_b23 = re.search(r"(?<![0-9a-zA-Z])(BV1[0-9A-Za-z]{9})(?![0-9a-zA-Z])", resp.url, re.IGNORECASE)
-                    if m_b23:
-                        return "BV" + m_b23.group(1)[2:]
-                except Exception:
-                    pass
-        # 3. 兜底路径匹配
+        """离线提取 BV 号（纯正则，不联网）。
+
+        短链（b23.tv）需联网解析，见 gui.util.resolve_short_link，
+        由 _start 在后台线程调用，避免阻塞主线程造成界面冻结。
+        """
+        from gui.util import extract_bvid
+
+        bvid = extract_bvid(text)
+        if bvid:
+            return bvid
+        # 兜底路径匹配（均为纯字符串处理，离线）
         if "video/" in text:
             part = text.split("video/", 1)[1]
             candidate = part.split("/")[0].split("?")[0].strip()
