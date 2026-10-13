@@ -255,7 +255,7 @@ class CollectPanel(ttk.Frame):
         self.lbl_status = ttk.Label(status, text="就绪。输入 BV 或视频链接开始。")
         self.lbl_status.pack(side="left")
         ttk.Checkbutton(status, text="暂停实时流", variable=self._pause_stream).pack(side="right", padx=(6, 0))
-        ttk.Button(status, text="清空流", command=self._clear_stream).pack(side="right")
+        ttk.Button(status, text="清空流", command=lambda: self._clear_stream(confirm=True)).pack(side="right")
 
         # 最底部：实时“正在干什么”指示条
         action = ttk.Frame(self, padding=(6, 2))
@@ -529,7 +529,17 @@ class CollectPanel(ttk.Frame):
         except tk.TclError:
             pass
 
-    def _clear_stream(self) -> None:
+    def _clear_stream(self, *, confirm: bool = False) -> None:
+        # confirm=True 用于用户点「清空流」按钮：采集中这是唯一的进度记录，
+        # 非空时先确认再清，避免误点丢历史。内部自动清理（开新任务）不确认。
+        if confirm:
+            running = self.worker is not None and self.worker.is_alive()
+            if self.txt.get("1.0", "end-1c").strip():
+                tip = "将清空实时流内容，此操作不可撤销。"
+                if running:
+                    tip += "\n（当前采集仍在进行，清空后无法回看已输出的记录）"
+                if not messagebox.askyesno("确认清空", tip + "\n仍要继续吗？"):
+                    return
         self.txt.configure(state="normal")
         self.txt.delete("1.0", "end")
         self.txt.configure(state="disabled")

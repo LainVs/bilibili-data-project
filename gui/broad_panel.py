@@ -170,7 +170,7 @@ class BroadPanel(ttk.Frame):
 
         self._pause_stream = tk.BooleanVar(value=True)
         ttk.Checkbutton(self, text="暂停实时流", variable=self._pause_stream).grid(row=5, column=0, sticky="w", padx=6, pady=4)
-        ttk.Button(self, text="清空流/表", command=self._clear).grid(
+        ttk.Button(self, text="清空流/表", command=lambda: self._clear(confirm=True)).grid(
             row=5, column=0, sticky="e", padx=6, pady=4)
 
         self._refresh_db_size()
@@ -205,7 +205,22 @@ class BroadPanel(ttk.Frame):
         except tk.TclError:
             pass
 
-    def _clear(self) -> None:
+    def _clear(self, *, confirm: bool = False) -> None:
+        # confirm=True 仅用于用户点「清空流/表」按钮；内部开新采集时的自动
+        # 清理不提示（否则每次开始采集都弹窗）。表格是采集候选结果、
+        # Text 是实时流记录，属有价值数据，故按钮路径非空时二次确认。
+        if confirm:
+            has_rows = bool(self.tree.get_children())
+            has_text = bool(self.txt.get("1.0", "end-1c").strip())
+            if has_rows or has_text:
+                what = []
+                if has_rows:
+                    what.append(f"候选表 {len(self.tree.get_children())} 行")
+                if has_text:
+                    what.append("实时流记录")
+                if not messagebox.askyesno(
+                        "确认清空", "将清空：" + "、".join(what) + "。\n此操作不可撤销，仍要继续吗？"):
+                    return
         self.txt.configure(state="normal")
         self.txt.delete("1.0", "end")
         self.txt.configure(state="disabled")
