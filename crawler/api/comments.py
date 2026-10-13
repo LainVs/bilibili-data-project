@@ -4,8 +4,6 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import time
-import urllib.parse
 
 from crawler.api.client import ApiClient
 from crawler.api.wbi import MIXIN_KEY_ENC, enc_wbi, get_wbi_keys
@@ -104,7 +102,6 @@ class CommentFetcher:
         让"翻页网络往返"与"二级回复等待"重叠，显著减少单视频总耗时。
         """
         from concurrent.futures import Future, ThreadPoolExecutor
-        from threading import Lock
 
         results: list[dict] = []
         guard = 0

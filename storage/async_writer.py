@@ -27,7 +27,7 @@ _COMMIT_BATCH = 800
 # 活跃写线程注册表：close(wait=False) 后采集线程已返回，但写线程仍在
 # 排空队列；强引用防止 writer 被 GC（daemon 写线程随之中断丢数据），
 # 供关窗流程等待全部落库完成。
-_registry: set["AsyncDbWriter"] = set()
+_registry: set[AsyncDbWriter] = set()
 _registry_lock = threading.Lock()
 
 

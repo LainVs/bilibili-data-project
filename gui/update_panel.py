@@ -16,7 +16,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from crawler.tasks.increment import incremental_update
-from gui.theme import C, F, S
+from gui.theme import C, F
 from gui.util import load_videos
 from gui.widgets import SmartTable
 

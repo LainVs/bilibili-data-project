@@ -32,7 +32,7 @@ def crawl_up_videos(client: ApiClient, mid: int, *,
 
     返回 {"mid", "videos", "fetched", "comments", "danmaku", "errors"}
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor
     from threading import Lock
 
     from storage import dao
@@ -257,9 +257,8 @@ def _crawl_one(client, bvid, aid=None, *, with_comments, with_danmaku, increment
                 progress_cb(f"  采评论（增量={incremental}）…")
             fetcher = CommentFetcher(client)
             min_ctime = dao.get_max_comment_ctime(aid, ref_type=1) if incremental else 0
-            if incremental and min_ctime:
-                if progress_cb:
-                    progress_cb(f"  增量起点：上次已采到评论时刻")
+            if incremental and min_ctime and progress_cb:
+                progress_cb("  增量起点：上次已采到评论时刻")
             comments = 0
 
             def _page_cb(page_no: int, count: int) -> None:

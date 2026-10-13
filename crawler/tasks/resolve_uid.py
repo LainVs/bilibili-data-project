@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from crc32_crack.core import build_forward_table, UidResolver
+from crc32_crack.core import UidResolver, build_forward_table
 
 logger = logging.getLogger(__name__)
 

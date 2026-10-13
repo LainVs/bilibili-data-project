@@ -1,8 +1,16 @@
 """D->E 拷文件归档：D每攒20G，拷文件在E建新小仓库，快且不怕掉盘。"""
 from __future__ import annotations
-import logging, threading, time, os, csv, uuid
+
+import csv
+import logging
+import os
+import threading
+import time
+import uuid
 from datetime import datetime
+
 import pymysql
+
 logger = logging.getLogger(__name__)
 _stop = threading.Event()
 _thread = None
@@ -259,7 +267,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                     shard = datetime.now().strftime(f"{_SHARD_PREFIX}%Y%m%d_%H%M%S")
                     e.close()
             if shard == prev["shard"]:
-                copied_ids = {k: v for k,v in prev.get("copied_ids", {}).items()}
+                copied_ids = dict(prev.get("copied_ids", {}).items())
                 offsets = prev.get("offsets", {})
             else:
                 copied_ids, offsets = {}, {}
@@ -384,7 +392,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                             cols2 = [c for c in cols if c != "fans"]
                             col_list2 = ", ".join(cols2)
                             # 重写 CSV 去掉 fans 列
-                            with open(out_path, "r", encoding="utf-8") as rf:
+                            with open(out_path, encoding="utf-8") as rf:
                                 import csv as _csv
                                 rows2 = list(_csv.reader(rf))
                             with open(out_path, "w", newline="", encoding="utf-8") as wf:
@@ -475,7 +483,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             ec = _get_archive_conn(shard, timeout=120)
             with ec.cursor() as cur:
                 cur.execute(f"SELECT {pk} FROM {table}")
-                have = set(r[0] if not isinstance(r, dict) else list(r.values())[0] for r in cur.fetchall())
+                have = {r[0] if not isinstance(r, dict) else list(r.values())[0] for r in cur.fetchall()}
             ec.close()
             miss = [i for i in ids if i not in have]
             if not miss: continue
@@ -509,7 +517,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
         # 二次验对：子集校验（shard ⊇ 已拷即可清 D；多出的行不影响清 D 安全）。
         # 之前用绝对相等，仓里多 1 行（并发写入/重复触发）就误判失败。
         ok = True
-        for table, pk, cols in _TABLES:
+        for table, pk, _cols in _TABLES:
             ids = copied_ids.get(table, [])
             exp = len(ids)
             if not ids:
@@ -540,7 +548,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                             return {"ok": False, "msg": "二次验对中取消", "shard": shard}
                         _batch = ids[_bi:_bi+5000]
                         cur.execute(f"SELECT {pk} FROM {table} WHERE {pk} IN ({','.join(['%s']*len(_batch))})", tuple(_batch))
-                        _have2 = set(r[pk] if isinstance(r, dict) else r[0] for r in cur.fetchall())
+                        _have2 = {r[pk] if isinstance(r, dict) else r[0] for r in cur.fetchall()}
                         _missing += sum(1 for _i in _batch if _i not in _have2)
                         if _missing:
                             break  # 有缺即停，不必扫完
@@ -688,7 +696,7 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
                     fmt = ",".join(["%s"] * len(chunk))
                     try:
                         cur.execute(f"DELETE FROM {table} WHERE {pk} IN ({fmt})", tuple(chunk))
-                    except Exception as exc:
+                    except Exception:
                         # 瞬时失败（锁等待超时等）：仅本批未提交，回滚后重试一次
                         try: d.rollback()
                         except Exception: pass

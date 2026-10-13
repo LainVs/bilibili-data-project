@@ -5,10 +5,10 @@ import logging
 
 from crawler.api.client import ApiClient
 from crawler.api.comments import (
-    CommentFetcher,
     REPLY_TYPE_ARTICLE,
     REPLY_TYPE_DYNAMIC,
     REPLY_TYPE_VIDEO,
+    CommentFetcher,
 )
 from crawler.api.posts import fetch_post_meta
 

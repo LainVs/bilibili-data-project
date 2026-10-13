@@ -9,7 +9,7 @@ from tkinter import ttk
 import pymysql
 
 from config import get_config
-from gui.theme import C, F, S
+from gui.theme import C, S
 from gui.widgets import ClaudeBadge, ClaudeCard, ModernConsole
 
 
@@ -338,7 +338,8 @@ class ConnectionPanel(ttk.Frame):
         self.after(5000, self.refresh)
 
     def _admin_start_e(self) -> None:
-        import ctypes, tempfile
+        import ctypes
+        import tempfile
 
         try:
             from storage.db import clear_manual_offline
@@ -373,7 +374,9 @@ if (Test-Path "E:\") {
 net start MySQL80-E 2>&1 | Out-Host
 """
         try:
-            tf = tempfile.NamedTemporaryFile(mode="w", suffix=".ps1", delete=False, encoding="utf-8")
+            # delete=False：脚本文件须存活到 ShellExecuteW 提权执行完毕，故不能用 with 立即关闭删除
+            tf = tempfile.NamedTemporaryFile(  # noqa: SIM115
+                mode="w", suffix=".ps1", delete=False, encoding="utf-8")
             tf.write(ps)
             tf.close()
             ret = ctypes.windll.shell32.ShellExecuteW(
@@ -406,8 +409,9 @@ net start MySQL80-E 2>&1 | Out-Host
         from tkinter import messagebox
 
         try:
-            from config import get_config as _gc
             import pymysql as _pm
+
+            from config import get_config as _gc
 
             _cfg = _gc().mysql_archive
             _c = _pm.connect(
@@ -555,7 +559,8 @@ net start MySQL80-E 2>&1 | Out-Host
                     self.after(0, lambda m=res["msg"]: self._append_log(m, tag="warn"))
                 self.after(0, self.refresh)
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("归档失败", str(exc)))
+                # lambda 默认参数绑定，避免 except 结束后 exc 被解绑导致 NameError
+                self.after(0, lambda e=str(exc): messagebox.showerror("归档失败", e))
                 self.after(0, lambda: self.lbl_tip.configure(text="归档失败"))
                 self.after(0, lambda e=str(exc): self._append_log(f"归档异常: {e}", tag="error"))
             finally:

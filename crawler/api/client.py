@@ -156,7 +156,6 @@ class ApiClient:
                 resp = self._session.get(url, params=params, headers=self._headers(), timeout=15)
                 resp.raise_for_status()
                 content = resp.content
-                ctype = resp.headers.get("Content-Type", "")
                 # JSON 错误探测：内容以 { 开头且能被解析为 dict
                 if content and content[:1] == b"{":
                     try:
@@ -199,11 +198,10 @@ def fetch_pages_parallel(fetch_one, pages: list[int], *, workers: int = 4,
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    cfg = get_config()
     n_w = max(1, min(workers, len(pages)))
     if not pages:
         return []
-    maker = client_factory or getattr(__import__("crawler.api.client", fromlist=["ApiClient"]), "ApiClient")
+    maker = client_factory or __import__("crawler.api.client", fromlist=["ApiClient"]).ApiClient
     out: dict[int, list] = {}
 
     def _run(pn: int) -> None:

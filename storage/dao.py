@@ -5,13 +5,13 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Iterable
+from collections.abc import Iterable
 
 import pymysql
 
-from storage.db import ensure_stats_cache_table
-from storage.db import ensure_up_stat_table
+from storage.db import ensure_stats_cache_table, ensure_up_stat_table
 from storage.db import get_conn as _get_conn
+
 
 class EArchiveOfflineError(Exception):
     """归档库 E 不可达，且调用方要求显式失败而非偷查 D。"""
@@ -42,6 +42,7 @@ _tls = threading.local()
 
 def _open_conn(role: str, db: str, read_timeout: int):
     import pymysql
+
     from config import get_config
     if role == "write":
         base = getattr(get_config(), "mysql_write", get_config().mysql)
@@ -367,7 +368,6 @@ def backfill_one_shard(shard: str, *, conn=None, progress_cb=None, stop_event=No
     期间锁住全局表。分块后每块秒级，即使中断也只丢当前块（幂等可重）。
     返回 {"uids_add": 估计搬运dim行数, "cuids": 去重评论者批次数}。
     """
-    import time as _time
     own_conn = conn is None
     if own_conn:
         conn = _r_strict()
@@ -726,6 +726,7 @@ def backfill_stat_counters() -> dict:
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
+
     from storage.db import ensure_stat_counters
 
     ensure_stat_counters()
@@ -1110,6 +1111,7 @@ def _uid_same_dsn() -> bool:
 def _query_comments_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -> list[dict]:
     """单个物理库内按 UID 查评论（表名带库前缀，同库内 JOIN 视频表）。"""
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -1138,6 +1140,7 @@ def _query_comments_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) 
 def _query_danmaku_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -> list[dict]:
     """单个物理库内按 UID 查弹幕（表名带库前缀，同库内 JOIN 视频表）。"""
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -1166,6 +1169,7 @@ def _query_danmaku_uid_one_db(db: str, role: str, uid: int, per_db_limit: int) -
 def _query_user_one_db(db: str, role: str, uid: int) -> dict | None:
     """单个物理库内按 UID 查用户维度信息。"""
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -1304,7 +1308,7 @@ def query_recent_videos(limit: int | None = None) -> list[dict]:
             sql = (
                 "SELECT aid, bvid, title, owner_uid, owner_name, pubdate FROM meta_video "
                 "ORDER BY pubdate DESC"
-                + (f" LIMIT %s" if limit else "")
+                + (" LIMIT %s" if limit else "")
             )
             cur.execute(sql, (limit,) if limit else ())
             videos = list(cur.fetchall())
@@ -1545,11 +1549,7 @@ def _stats_plausible(stats: dict | None) -> bool:
     """
     if not isinstance(stats, dict):
         return False
-    if (stats.get("comments") or 0) == 0:
-        if (stats.get("video_with_comments") or 0) > 0 \
-                or (stats.get("comment_uids") or 0) > 0:
-            return False
-    return True
+    return not ((stats.get("comments") or 0) == 0 and ((stats.get("video_with_comments") or 0) > 0 or (stats.get("comment_uids") or 0) > 0))
 
 
 def load_stats_cache() -> dict | None:
@@ -1557,7 +1557,6 @@ def load_stats_cache() -> dict | None:
     # 先试E，短超时快退
     try:
         # 不在此处建表，避免E离线时卡600秒
-        from storage.db import get_conn as _get_conn_raw
         import pymysql
         cfg = __import__("config", fromlist=["get_config"]).get_config().mysql_archive
         try:
@@ -1829,6 +1828,7 @@ def query_top_up_uids(limit: int = 5) -> list[int]:
     if len(agg) < limit:
         try:
             import pymysql
+
             from config import get_config
             cfg = get_config().mysql_archive
             conn = pymysql.connect(host=cfg['host'], port=cfg['port'], user=cfg['user'], password=cfg['password'], database='bilibili_data', charset=cfg['charset'], cursorclass=pymysql.cursors.DictCursor, connect_timeout=3, read_timeout=8, write_timeout=8)
@@ -1903,6 +1903,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
         for role in ("read", "write"):
             try:
                 import pymysql
+
                 from config import get_config
                 cfg = get_config()
                 base = getattr(cfg, "mysql_archive" if role=="read" else "mysql_write", cfg.mysql)
@@ -1940,6 +1941,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
         # D
         try:
             import pymysql
+
             from config import get_config
             cfg = get_config()
             base_w = getattr(cfg, "mysql_write", cfg.mysql)
@@ -1955,6 +1957,7 @@ def top_commenters(owner_uid: int, *, excl_uids: set[int] | None = None,
         for db in shard_dbs:
             try:
                 import pymysql
+
                 from config import get_config
                 cfg = get_config()
                 base = getattr(cfg, "mysql_archive", cfg.mysql)
@@ -2377,6 +2380,7 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
     if not limit or limit <= 0:
         limit = 500000
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role=="read" else "mysql_write", cfg.mysql)
@@ -2510,6 +2514,7 @@ def _search_danmaku_one_db(db: str, role: str, groups: list[list[str]], start: s
                            exclude: str, limit: int) -> list[dict]:
     """单个物理库内搜弹幕（表名带库前缀，同库内 JOIN）。"""
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -2690,6 +2695,7 @@ def _iter_search_one_db(db: str, role: str, groups: list[list[str]], *, table: s
     按 (ctime, 主键) 倒序翻页，ctime 撞车用主键兜底保证不重不漏。
     """
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -2739,8 +2745,7 @@ def _iter_search_one_db(db: str, role: str, groups: list[list[str]], *, table: s
                 rows = list(cur.fetchall())
                 if not rows:
                     break
-                for r in rows:
-                    yield r
+                yield from rows
                 if len(rows) < page:
                     break
                 last = rows[-1]
@@ -2831,6 +2836,7 @@ def _search_videos_one_db(db: str, role: str, groups: list[list[str]], start: st
                           limit: int) -> list[dict]:
     """单个物理库内搜视频（含库内评论/弹幕计数）。"""
     import pymysql
+
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write", cfg.mysql)
@@ -3153,6 +3159,7 @@ def get_daily_comment_counts(days: int = 30) -> list[dict]:
     for db, role in targets:
         try:
             import pymysql
+
             from config import get_config
             cfg = get_config()
             base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",
@@ -3202,6 +3209,7 @@ def get_hourly_comment_counts() -> list[dict]:
     for db, role in targets:
         try:
             import pymysql
+
             from config import get_config
             cfg = get_config()
             base_cfg = getattr(cfg, "mysql_archive" if role == "read" else "mysql_write",

@@ -18,7 +18,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from gui.theme import C, F, S
+from gui.theme import C, F
 from gui.util import fmt_dt
 from gui.widgets import SmartTable
 from storage import dao
@@ -368,12 +368,12 @@ class SearchPanel(ttk.Frame):
         sources = {"cmt": self.var_in_c.get(), "dmk": self.var_in_d.get(),
                    "video": self.var_in_v.get()}
         # 危险组合二次确认：单字词全表扫描 + 无限量，多仓跑起来很慢
-        from storage.dao import parse_smart_query, flatten_smart_query
+        from storage.dao import flatten_smart_query, parse_smart_query
         _terms = flatten_smart_query(parse_smart_query(kw))
-        if _terms and all(len(t) < 2 for t in _terms) and (not limit or limit <= 0):
-            if not messagebox.askyesno("确认", "单字关键词 + 无限条数会全表扫描所有分仓，可能很慢。\n"
-                                                "建议改成每分区200条或用2字以上关键词。\n\n仍要继续吗？"):
-                return
+        if (_terms and all(len(t) < 2 for t in _terms) and (not limit or limit <= 0)
+                and not messagebox.askyesno("确认", "单字关键词 + 无限条数会全表扫描所有分仓，可能很慢。\n"
+                                                     "建议改成每分区200条或用2字以上关键词。\n\n仍要继续吗？")):
+            return
 
         hint = "搜索中…"
         if _terms and all(len(t) < 2 for t in _terms):
@@ -393,7 +393,7 @@ class SearchPanel(ttk.Frame):
             try:
                 results = self._query(sources, kw, start, end, limit, exclude,
                                       cmt_cb=_on_shard, min_like=min_like)
-            except Exception as exc:
+            except Exception:
                 logger.exception("搜索失败")
                 results = None
             self._search_q.put((results, kw, limit, my_gen, min_like))
@@ -453,7 +453,7 @@ class SearchPanel(ttk.Frame):
                  if totals[k] is None or totals[k] > shown[k]]
         shown_txt = {k: (str(v) if v is not None else f"≥{shown[k]}")
                      for k, v in totals.items()}
-        from storage.dao import parse_smart_query, flatten_smart_query
+        from storage.dao import flatten_smart_query, parse_smart_query
         _groups = parse_smart_query(kw)
         _terms = flatten_smart_query(_groups)
         kw_display = " / ".join(" + ".join(g) for g in _groups) if _groups else kw
@@ -597,7 +597,7 @@ class SearchPanel(ttk.Frame):
         txt.tag_configure("sub", foreground="#777")
         txt.tag_configure("sep", foreground="#bbb")
         kw = self._last_kw
-        for i, r in enumerate(rows, start=1):
+        for _i, r in enumerate(rows, start=1):
             if sec == "cmt":
                 sender = r.get("uname") or str(r.get("uid") or "未知")
                 if r.get("uid") and r.get("uname"):
@@ -632,9 +632,9 @@ class SearchPanel(ttk.Frame):
             pass
 
     @staticmethod
-    def _highlight(txt: "tk.Text", keyword: str) -> None:
+    def _highlight(txt: tk.Text, keyword: str) -> None:
         """高亮所有关键词（智能语法拆词后逐词高亮，引号短语整体高亮）。"""
-        from storage.dao import parse_smart_query, flatten_smart_query
+        from storage.dao import flatten_smart_query, parse_smart_query
         txt.tag_configure("hit", background="#ffe28a", foreground="#a00")
         for kw in flatten_smart_query(parse_smart_query(keyword)):
             start = "1.0"
@@ -672,7 +672,8 @@ class SearchPanel(ttk.Frame):
                 danmaku = dao.query_danmaku_by_video(aid, limit=800)
                 self.after(0, lambda: self._show_video_win(bvid, row, comments, danmaku))
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("查询失败", str(exc)))
+                # lambda 默认参数绑定，避免 except 结束后 exc 被解绑导致 NameError
+                self.after(0, lambda e=str(exc): messagebox.showerror("查询失败", e))
         import threading
         threading.Thread(target=worker, daemon=True).start()
 

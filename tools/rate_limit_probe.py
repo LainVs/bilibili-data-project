@@ -23,7 +23,6 @@ import datetime
 import sys
 import threading
 import time
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 使 tools/ 下的脚本可 import 项目根模块
@@ -285,7 +284,7 @@ def main() -> None:
     if not targets:
         print("未能在库中找到候选视频。请先用 GUI 采集至少 1 个视频。")
         sys.exit(2)
-    jobs = _build_jobs(targets, kinds=set(k.strip() for k in args.kinds.split(",")))
+    jobs = _build_jobs(targets, kinds={k.strip() for k in args.kinds.split(",")})
 
     print("=" * 62)
     print(f"轮转目标 {len(targets)} 个: " +

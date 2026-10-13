@@ -12,7 +12,6 @@ from __future__ import annotations
 import csv
 import logging
 import time
-from typing import Any
 
 from analysis.text import (
     daily_series,
@@ -387,8 +386,8 @@ def export_detect_csv(results: list[dict], path: str) -> str:
 
 def get_user_ip_trajectory(uid: int) -> dict:
     """查询指定 UID 的完整属地流转轨迹与瞬移风险判定。"""
-    from storage import dao
     from analysis.ip_trajectory import analyze_user_ip_trajectory
+    from storage import dao
 
     comments = dao.query_comments_by_uid(uid, limit=0) or []
     traj = analyze_user_ip_trajectory(comments)

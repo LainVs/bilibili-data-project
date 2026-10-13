@@ -1,4 +1,4 @@
-﻿"""数据分析与挖掘层（含文本/统计/水军检测/IP属地轨迹）。"""
+"""数据分析与挖掘层（含文本/统计/水军检测/IP属地轨迹）。"""
 from analysis.detect import detect_water_army, score_user
 from analysis.ip_trajectory import (
     PROVINCE_COORDS,

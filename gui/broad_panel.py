@@ -10,14 +10,14 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from gui.crawl_worker import (
-    BroadCrawlWorker,
     MSG_DONE,
     MSG_ERROR,
     MSG_ITEM,
     MSG_PROGRESS,
+    BroadCrawlWorker,
     PopularCrawlWorker,
 )
-from gui.theme import C, F, S
+from gui.theme import C
 from gui.util import format_comment_line
 from gui.widgets import SmartTable
 
@@ -130,7 +130,6 @@ class BroadPanel(ttk.Frame):
         # 已处理 UP 表
         grid = ttk.LabelFrame(self, text="已采集 UP", padding=(4, 2))
         grid.grid(row=2, column=0, sticky="ew", padx=6, pady=4)
-        cols = ("uid", "total", "done", "cmt")
         self.tree = SmartTable(grid, show="headings")
         self.tree.set_columns(
             [("uid", "UID", 12), ("total", "视频总数", 9),
@@ -557,7 +556,6 @@ class BroadPanel(ttk.Frame):
 
     def _start_mode(self, prefix: str, factory) -> None:
         """启动任意采集 worker 的公共流程（清流、起进度条、开轮询）。"""
-        from gui.crawl_worker import PopularCrawlWorker
 
         self._clear()
         self.lbl_vpos.configure(text="")

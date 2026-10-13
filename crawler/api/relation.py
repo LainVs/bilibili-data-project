@@ -67,7 +67,7 @@ class RelationFetcher:
         def _fetch_page(client, pn: int) -> list[dict]:
             params = {"vmid": mid, "pn": pn, "ps": 50, "order": "desc"}
             payload = client.get_json(api, params=params)
-            return _parse((payload.get("data") or {}))
+            return _parse(payload.get("data") or {})
 
         def _parse(data: dict) -> list[dict]:
             out: list[dict] = []

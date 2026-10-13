@@ -166,8 +166,8 @@ class FavoritesFetcher:
                     if total and len(videos) >= total:
                         return videos
                 # 整批页全部成功且每页均命中"已采集完成"→ 后续更早收藏的页无需再拉
-                if all_done_check and len(results) == len(batch):
-                    if all(all_done_check(it) for _pn, it in results):
-                        self.early_stopped = True
-                        return videos
+                if (all_done_check and len(results) == len(batch)
+                        and all(all_done_check(it) for _pn, it in results)):
+                    self.early_stopped = True
+                    return videos
         return videos

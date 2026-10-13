@@ -362,7 +362,8 @@ class UserQueryPanel(ttk.Frame):
                 n = len(all_rows)
                 self.after(0, lambda: [box.destroy(), messagebox.showinfo("导出完成", f"已导出该用户全部 {n:,} 条发言至:\n{path}")])
             except Exception as exc:
-                self.after(0, lambda: [box.destroy(), messagebox.showerror("导出失败", str(exc))])
+                # lambda 默认参数绑定，避免 except 结束后 exc 被解绑导致 NameError
+                self.after(0, lambda e=str(exc): [box.destroy(), messagebox.showerror("导出失败", e)])
 
         threading.Thread(target=_worker, daemon=True).start()
 

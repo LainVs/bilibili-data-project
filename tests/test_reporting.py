@@ -79,6 +79,7 @@ def test_generate_report_disk():
         path = generate_report("BV1tJ4m1T7QL", out_path, limit=200)
         assert os.path.exists(path)
         assert os.path.getsize(path) > 500
-        content = open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
         assert "<!DOCTYPE html>" in content
         assert "BILIBILI DATA INTELLIGENCE REPORT" in content

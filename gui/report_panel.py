@@ -8,7 +8,7 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
-from gui.theme import C, F, S
+from gui.theme import C, S
 from gui.widgets import ClaudeBadge, ClaudeCard
 from reporting import ReportSections, generate_report
 

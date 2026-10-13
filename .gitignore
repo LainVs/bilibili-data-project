@@ -41,6 +41,8 @@ __pycache__/
 venv/
 .idea/
 .vscode/
+.pytest_cache/
+.ruff_cache/
 
 # ========== 系统文件 ==========
 Thumbs.db

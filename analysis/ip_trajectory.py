@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import math
-from collections import Counter
 from typing import Any
 
 from analysis.detect import parse_ts
@@ -198,9 +197,9 @@ def analyze_user_ip_trajectory(
         # 1. 距离 >= 300km 且 速度 > 800 km/h (超越高铁飞机常规极限)；
         # 2. 或者 距离 >= 400km 且 间隔 < 30 分钟 (无论航线多快均不可能完成机坪与安检)
         is_teleport = False
-        if dist_km >= min_teleport_dist_km:
-            if speed_kmh > teleport_speed_kmh or (interval_hours < 0.5 and dist_km >= 400.0):
-                is_teleport = True
+        if dist_km >= min_teleport_dist_km and (
+                speed_kmh > teleport_speed_kmh or (interval_hours < 0.5 and dist_km >= 400.0)):
+            is_teleport = True
 
         if is_teleport:
             teleport_count += 1

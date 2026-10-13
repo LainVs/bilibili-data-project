@@ -1,0 +1,71 @@
+[project]
+name = "bilibili-data-project"
+version = "0.1.0"
+description = "B站弹幕/评论采集、清洗、存储、反查与分析全流程"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pymysql>=1.1.0",
+    "APScheduler>=3.10",
+]
+
+[project.optional-dependencies]
+charts = ["matplotlib>=3.8"]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "pre-commit>=3.7",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+    "tests/_archive",
+]
+
+[tool.ruff.lint]
+# 起步阶段只启用对正确性/可读性收益明确的规则，避免一次性淹没在历史告警里。
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes（未使用导入/变量、未定义名等）
+    "W",   # pycodestyle warnings
+    "I",   # isort 导入排序
+    "UP",  # pyupgrade（过时语法）
+    "B",   # flake8-bugbear（常见陷阱）
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",    # 行长由 formatter 处理
+    "E701",    # 单行多语句(冒号)：历史紧凑写法(try: x / except: pass)，展开改动面过大
+    "E702",    # 单行多语句(分号)：同上
+    "B008",    # 函数默认值调用（FastAPI 风格，本仓库未用）
+    "SIM105",  # 建议用 contextlib.suppress 替代 try/except pass，改动面过大
+    "SIM108",  # 三元表达式建议，保留显式 if/else 可读性
+    "SIM117",  # 嵌套 with 合并建议，保持现状更清晰
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试与打包脚本放宽：允许通配导入、私有名访问等
+"tests/**" = ["F401", "F811"]
+"build.spec" = ["F821"]  # SPECPATH 由 PyInstaller 注入
+# main.py 里 p_init/p_incr 等是 add_parser 的副作用配置，赋值本身即用途
+"main.py" = ["F841"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

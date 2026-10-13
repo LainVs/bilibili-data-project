@@ -11,10 +11,10 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable, Sequence
 from tkinter import ttk
-from typing import Callable, Sequence
 
-from gui.theme import C, F, S
+from gui.theme import C, F
 
 
 class ClaudeBadge(tk.Frame):
@@ -210,7 +210,7 @@ class PillTabs(tk.Frame):
         self._build_tabs(bg)
 
     def _build_tabs(self, container_bg: str) -> None:
-        for i, (key, label) in enumerate(self._tabs):
+        for _i, (key, label) in enumerate(self._tabs):
             c = tk.Canvas(
                 self,
                 height=28,
@@ -225,7 +225,6 @@ class PillTabs(tk.Frame):
             c._active = (key == self._current_key)
 
             # 计算文字宽度动态确定 canvas 尺寸
-            font_obj = F.BODY
             text_w = max(40, len(label) * 14 + 16)
             c.configure(width=text_w)
 

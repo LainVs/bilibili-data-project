@@ -1,7 +1,7 @@
 """清洗 / 规范化管道：评论、弹幕、用户、视频数据入库前的装配。"""
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from etl.cleaner import normalize_ip, sanitize_user_profile
 

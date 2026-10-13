@@ -111,8 +111,9 @@ def broad_crawl(seeds: list[int], *,
         if not queue:
             if perpetual and processed < max_ups:
                 try:
-                    from storage.dao import query_top_up_uids
                     import random
+
+                    from storage.dao import query_top_up_uids
                     # 永续：扩大池子避免永远前5，排除已采
                     pool = query_top_up_uids(limit=100)
                     seeds2 = [u for u in pool if u not in visited]
@@ -148,10 +149,12 @@ def broad_crawl(seeds: list[int], *,
         try:
             r = _crawl_up(client, uid, max_pages=max_pages,
                           item_cb=item_cb, progress_cb=progress_cb,
-                          video_cb=lambda i, n, t: _status(
-                              phase="collecting", uid=uid, depth=depth,
-                              queue=len(queue), processed=processed,
-                              uname=uname, vtitle=t, action=f"视频 {i}/{n}"),
+                          # lambda 默认参数绑定循环变量，避免回调逃逸后读到下一轮的值
+                          video_cb=lambda i, n, t, _uid=uid, _depth=depth,
+                          _proc=processed, _uname=uname: _status(
+                              phase="collecting", uid=_uid, depth=_depth,
+                              queue=len(queue), processed=_proc,
+                              uname=_uname, vtitle=t, action=f"视频 {i}/{n}"),
                           stop_flag=stop_flag, pause_flag=pause_flag, workers=workers)
         except Exception as exc:
             stats["errors"].append(f"UP{uid}: {exc}")

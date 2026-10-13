@@ -170,9 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "up":
+        from config import get_config
         from crawler.api.client import ApiClient
         from crawler.tasks.up_crawl import crawl_up_videos
-        from config import get_config
 
         cfg = get_config()
         if not cfg.cookie:
@@ -209,8 +209,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command in ("crawl", "increment", "serve"):
-        from crawler.api.client import ApiClient
         from config import get_config
+        from crawler.api.client import ApiClient
 
         cfg = get_config()
         if not cfg.cookie:
@@ -307,8 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "export":
-        from storage import dao
         import etl
+        from storage import dao
 
         rows = []
         mapping = None

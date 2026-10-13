@@ -58,7 +58,7 @@ class DanmakuFetcher:
         items: list[dict] = []
 
         if self._has_any_danmaku(cid, start, end, stop_flag=stop_flag, progress_cb=progress_cb):
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import ThreadPoolExecutor
             from threading import Lock
 
             day_workers = getattr(__import__("config", fromlist=["get_config"]).get_config(), "danmaku_day_workers", 4)

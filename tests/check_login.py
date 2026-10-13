@@ -41,7 +41,7 @@ def check() -> None:
         code = nav.get("code", -999)
         data = nav.get("data") or {}
         if code == 0 and data.get("isLogin"):
-            print(f"[OK] 已登录")
+            print("[OK] 已登录")
             print(f"[OK] UID     : {data.get('mid')}")
             print(f"[OK] 用户名  : {data.get('uname')}")
             print(f"[OK] 等级    : {data.get('level_info', {}).get('current_level')}")

@@ -17,9 +17,9 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from gui.theme import C, F, S
+from gui.theme import C, F
 from gui.util import fmt_dt
-from gui.widgets import ClaudeBadge, ClaudeCard, SmartTable
+from gui.widgets import ClaudeCard, SmartTable
 from storage import dao
 
 logger = logging.getLogger(__name__)
@@ -291,7 +291,7 @@ class StatsPanel(ttk.Frame):
             return
         headers = [c[1] for c in cols]
         keys = [c[0] for c in cols]
-        mapping = [(k, h) for k, h in zip(keys, headers)]
+        mapping = list(zip(keys, headers, strict=True))
         rows = []
         for iid in tree.get_children():
             vals = list(tree.item(iid, "values") or ())

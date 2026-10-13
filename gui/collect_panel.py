@@ -8,18 +8,18 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from gui.crawl_worker import (
-    CrawlWorker,
     MSG_DONE,
     MSG_ERROR,
     MSG_ITEM,
     MSG_META,
     MSG_PROGRESS,
+    CrawlWorker,
     PostCrawlWorker,
     UpCrawlWorker,
 )
-from gui.theme import C, F, S
+from gui.theme import C, F
 from gui.util import format_comment_line, format_danmaku_line, load_videos, video_summary
-from gui.widgets import ClaudeBadge, ClaudeCard, PillTabs, SmartTable
+from gui.widgets import PillTabs, SmartTable
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +503,8 @@ class CollectPanel(ttk.Frame):
                 danmaku = dao.query_danmaku_by_video(aid, limit=800)
                 self.after(0, lambda: self._show_stored(v, comments, danmaku))
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("查询失败", str(exc)))
+                # lambda 默认参数绑定，避免 except 结束后 exc 被解绑导致 NameError
+                self.after(0, lambda e=str(exc): messagebox.showerror("查询失败", e))
                 self.after(0, lambda: self.lbl_status.configure(text="查询失败"))
         import threading
         threading.Thread(target=worker, daemon=True).start()
@@ -631,8 +632,7 @@ class CollectPanel(ttk.Frame):
         self.txt.configure(wrap="none")  # 实时流恢复横向滚动
         mode = self.var_mode.get()
 
-        from gui.crawl_worker import (
-        FavCrawlWorker, PostCrawlWorker, RelationCrawlWorker, UpCrawlWorker)
+        from gui.crawl_worker import FavCrawlWorker, RelationCrawlWorker
 
         if mode == "up":
             try:
@@ -683,7 +683,7 @@ class CollectPanel(ttk.Frame):
             worker = PostCrawlWorker(self.msg_q, target=target,
                                      comments=self.var_comments.get(),
                                      incremental=self.var_incremental.get())
-            self.lbl_status.configure(text=f"帖子：准备采集评论…")
+            self.lbl_status.configure(text="帖子：准备采集评论…")
         else:
             bvid = self._extract_bvid(target)
             if not bvid:

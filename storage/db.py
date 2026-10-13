@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import threading
-from typing import Any
 
 import pymysql
 
@@ -125,9 +124,7 @@ def is_manual_offline(role: str = "write") -> bool:
 def _once_claim(key: str) -> bool:
     """返回 True 表示本次需要执行；False 表示本进程已成功做过，跳过。"""
     with _ensured_lock:
-        if key in _ensured:
-            return False
-        return True
+        return key not in _ensured
 
 
 def _once_done(key: str, ok: bool) -> None:

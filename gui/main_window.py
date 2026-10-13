@@ -368,7 +368,7 @@ class MainWindow(tk.Tk):
 
     def _on_close(self) -> None:
         stopped: list[threading.Thread] = []
-        for label, panel in self._pages.items():
+        for _label, panel in self._pages.items():
             worker = getattr(panel, "worker", None)
             if isinstance(worker, threading.Thread) and worker.is_alive():
                 if callable(getattr(worker, "stop", None)):
@@ -378,7 +378,7 @@ class MainWindow(tk.Tk):
             if isinstance(flag, threading.Event):
                 flag.set()
             elif callable(getattr(panel, "stop", None)):
-                getattr(panel, "stop")()
+                panel.stop()
         self._closing = {"threads": stopped, "deadline": time.time() + 60.0}
         self._wdog_stop.set()
         try:
@@ -431,6 +431,7 @@ class MainWindow(tk.Tk):
         if not path:
             return
         import threading
+
         from tools.db_transfer import export_dump
 
         box = tk.Toplevel(self)
@@ -460,6 +461,7 @@ class MainWindow(tk.Tk):
         if not path:
             return
         import threading
+
         from tools.db_transfer import import_dump
 
         box = tk.Toplevel(self)
@@ -507,6 +509,7 @@ class MainWindow(tk.Tk):
         def _do_check() -> None:
             try:
                 import pymysql
+
                 from config import get_config
                 from storage.db import init_db
                 cfg = get_config().mysql
@@ -529,7 +532,11 @@ class MainWindow(tk.Tk):
     # ═══════════════════ MySQL 守护 ═══════════════════
 
     def _service_watchdog(self) -> None:
-        import subprocess, time, pymysql
+        import subprocess
+        import time
+
+        import pymysql
+
         from config import get_config
 
         def _ping_db() -> bool:
@@ -585,7 +592,7 @@ class MainWindow(tk.Tk):
         def _get_datadir_drive() -> str:
             try:
                 ini = r"C:\ProgramData\MySQL\MySQL Server 8.0\my.ini"
-                with open(ini, "r", encoding="utf-8", errors="ignore") as f:
+                with open(ini, encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         if line.strip().startswith("datadir"):
                             val = line.split("=", 1)[1].strip()

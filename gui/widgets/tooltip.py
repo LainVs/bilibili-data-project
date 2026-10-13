@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+
 from gui.theme import C, F
 
 

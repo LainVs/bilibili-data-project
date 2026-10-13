@@ -9,10 +9,10 @@ import logging
 import queue
 import threading
 
+from config import get_config
 from crawler.api.client import ApiClient
 from crawler.api.comments import CommentFetcher
 from crawler.api.danmaku import DanmakuFetcher
-from config import get_config
 from storage import dao
 
 logger = logging.getLogger(__name__)
@@ -417,13 +417,13 @@ class BatchUpWorker(threading.Thread):
             self.current_job = None
 
     def _run_one(self, client, kind: str, uid: int, direction: str, on_item) -> dict:
-        common = dict(
-            with_comments=self.do_comments, with_danmaku=self.do_danmaku,
-            incremental=self.incremental, max_pages=self.max_pages,
-            item_cb=on_item,
-            progress_cb=lambda t: self._emit(MSG_PROGRESS, phase="批量", text=t),
-            stop_flag=self._stop, workers=get_config().up_workers,
-        )
+        common = {
+            "with_comments": self.do_comments, "with_danmaku": self.do_danmaku,
+            "incremental": self.incremental, "max_pages": self.max_pages,
+            "item_cb": on_item,
+            "progress_cb": lambda t: self._emit(MSG_PROGRESS, phase="批量", text=t),
+            "stop_flag": self._stop, "workers": get_config().up_workers,
+        }
         if kind == "fav":
             from crawler.tasks.fav_crawl import crawl_user_favorites
             return crawl_user_favorites(client, uid, **common)
@@ -537,7 +537,7 @@ class PostCrawlWorker(threading.Thread):
 
     def run(self) -> None:
         from crawler.api.client import ApiClient
-        from crawler.api.comments import CommentFetcher, REPLY_TYPE_ARTICLE, REPLY_TYPE_DYNAMIC
+        from crawler.api.comments import REPLY_TYPE_ARTICLE, REPLY_TYPE_DYNAMIC, CommentFetcher
         from crawler.api.posts import parse_post_link
         from crawler.tasks.post_crawl import crawl_one_post
 
@@ -654,20 +654,20 @@ class PopularCrawlWorker(threading.Thread):
                     min_ctime = (dao.get_max_comment_ctime(aid, ref_type=1)
                                  if self.incremental else 0)
 
-                    def on_cb(kind: str, raw: dict) -> None:
+                    def on_cb(kind: str, raw: dict, _aid=aid) -> None:
                         if kind == "comment":
-                            item = CommentFetcher(client)._normalize(raw, aid)
+                            item = CommentFetcher(client)._normalize(raw, _aid)
                             # 非阻塞：攒批异步落库（停止后线程秒退，数据后台写完）
-                            writer.add_comment(normalize_comment(item, aid))
+                            writer.add_comment(normalize_comment(item, _aid))
                             self.stats["comments"] += 1
                             self._emit(MSG_ITEM, kind="comment", data=item)
 
-                    def _page_cb(p: int, n: int) -> None:
+                    def _page_cb(p: int, n: int, _idx=idx, _title=title) -> None:
                         self.status.update(
                             {"action": f"评论 第{p}页 已拉 {n} 条",
                              "comments": self.stats["comments"]})
                         self._emit(MSG_PROGRESS, phase="热搜",
-                                   text=f"[{idx}/{len(items)}] {title} "
+                                   text=f"[{_idx}/{len(items)}] {_title} "
                                         f"评论 第{p}页 已拉 {n} 条")
 
                     CommentFetcher(client).collect(

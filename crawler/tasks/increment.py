@@ -80,7 +80,6 @@ def update_ups_batch(client: ApiClient, uids: list[int], *,
 
     返回 {"ups", "ups_ok", "videos", "comments", "errors"}
     """
-    from storage import dao
 
     stats = {"ups": len(uids), "ups_ok": 0, "videos": 0, "comments": 0, "errors": []}
     if not uids:

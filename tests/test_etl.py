@@ -1,11 +1,12 @@
 """ETL 清洗、聚合与导出单元测试。"""
 import json
-from etl.cleaner import clean_text, normalize_ip, sanitize_user_profile
+
 from etl.aggregator import (
     aggregate_ip_distribution,
     aggregate_user_engagement,
     aggregate_video_summary,
 )
+from etl.cleaner import clean_text, normalize_ip, sanitize_user_profile
 from etl.exporter import (
     COMMENT_FIELDS,
     DANMAKU_FIELDS,
@@ -95,14 +96,14 @@ def test_export_csv_and_jsonl(tmp_path):
 
     count_csv = export_to_csv(rows, csv_file, field_mapping=[("rpid", "ID"), ("content", "内容")])
     assert count_csv == 2
-    with open(csv_file, "r", encoding="utf-8-sig") as f:
+    with open(csv_file, encoding="utf-8-sig") as f:
         content = f.read()
         assert "ID,内容" in content
         assert "1,测试评论" in content
 
     count_jsonl = export_to_jsonl(rows, jsonl_file)
     assert count_jsonl == 2
-    with open(jsonl_file, "r", encoding="utf-8") as f:
+    with open(jsonl_file, encoding="utf-8") as f:
         lines = [json.loads(line) for line in f]
         assert len(lines) == 2
         assert lines[0]["rpid"] == 1

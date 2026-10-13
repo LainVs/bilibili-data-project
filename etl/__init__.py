@@ -1,4 +1,4 @@
-﻿"""ETL 数据清洗、加工与导出层。"""
+"""ETL 数据清洗、加工与导出层。"""
 from etl.aggregator import (
     aggregate_ip_distribution,
     aggregate_user_engagement,

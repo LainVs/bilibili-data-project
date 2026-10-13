@@ -1,12 +1,14 @@
 """CRC32 极速破解引擎单元测试。"""
 import zlib
+
 import pytest
+
 from crc32_crack.core import (
+    UidResolver,
     crack,
     crack_candidates,
     crack_fast,
     uid_to_mid_hash,
-    UidResolver,
 )
 
 

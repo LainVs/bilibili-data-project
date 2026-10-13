@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import pymysql
 
 from config import get_config, update_mysql_archive_config, update_mysql_config
-from gui.theme import C, F, S
+from gui.theme import C
 
 try:
     import pymysql.cursors
@@ -129,7 +129,7 @@ class DbConfigDialog(tk.Toplevel):
             if key == "password":
                 self._show_pw = tk.BooleanVar(value=False)
                 ttk.Checkbutton(frm, text="显示", variable=self._show_pw,
-                                command=lambda: ent.configure(
+                                command=lambda _ent=ent: _ent.configure(
                                     show="" if self._show_pw.get() else "*")
                                 ).grid(row=i + 1, column=2, sticky="w", padx=4)
 
@@ -252,8 +252,9 @@ class DbConfigDialog(tk.Toplevel):
 
     def _save_connections_section(self) -> None:
         """把所有预设写回 settings.ini [connections] section。"""
-        from config import CONFIG_FILE
         import configparser
+
+        from config import CONFIG_FILE
         cp = configparser.RawConfigParser()
         cp.read(str(CONFIG_FILE), encoding="utf-8")
         if not cp.has_section("connections"):
@@ -265,8 +266,8 @@ class DbConfigDialog(tk.Toplevel):
         with open(str(CONFIG_FILE), "w", encoding="utf-8") as f:
             cp.write(f)
         # 刷新内存缓存
-        from config import get_config
         import config as cfg_mod
+        from config import get_config
         cfg_mod._config = None
         self._cfg = get_config()
         self._cfg._parser.read(str(CONFIG_FILE), encoding="utf-8")
@@ -290,8 +291,9 @@ class DbConfigDialog(tk.Toplevel):
                 self.after(0, lambda: self._lbl_datadir.configure(
                     text=f"当前: {row['d']}" if row else "当前: 查询失败"))
             except Exception as exc:
-                self.after(0, lambda: self._lbl_datadir.configure(
-                    text=f"当前: 无法读取（{exc}）", foreground=C.ERROR))
+                # lambda 默认参数绑定，避免 except 结束后 exc 被解绑导致 NameError
+                self.after(0, lambda e=str(exc): self._lbl_datadir.configure(
+                    text=f"当前: 无法读取（{e}）", foreground=C.ERROR))
 
         threading.Thread(target=worker, daemon=True).start()
 

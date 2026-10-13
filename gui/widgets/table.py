@@ -18,7 +18,7 @@ import re
 import tkinter as tk
 from tkinter import ttk
 
-from gui.theme import C, F, S
+from gui.theme import C, F
 
 _GRIP = 5  # 表头分割线附近多少像素内判定为"可拖"
 

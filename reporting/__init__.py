@@ -5,7 +5,6 @@ import html
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -252,12 +251,12 @@ def render_svg_line_chart(series: list[dict], width: int = 760, height: int = 24
 
     svg = [
         f'<svg width="100%" height="{height}" viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;">',
-        f'<defs>',
-        f'<linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">',
-        f'<stop offset="0%" stop-color="#da7756" stop-opacity="0.25"/>',
-        f'<stop offset="100%" stop-color="#da7756" stop-opacity="0.0"/>',
-        f'</linearGradient>',
-        f'</defs>',
+        '<defs>',
+        '<linearGradient id="lineGrad" x1="0" y1="0" x2="0" y2="1">',
+        '<stop offset="0%" stop-color="#da7756" stop-opacity="0.25"/>',
+        '<stop offset="100%" stop-color="#da7756" stop-opacity="0.0"/>',
+        '</linearGradient>',
+        '</defs>',
         # 网格基准线
         f'<line x1="{padding_x}" y1="{height - padding_y}" x2="{width - padding_x}" y2="{height - padding_y}" stroke="#e7e5dc" stroke-width="1"/>',
         f'<line x1="{padding_x}" y1="{padding_y}" x2="{width - padding_x}" y2="{padding_y}" stroke="#f0eee6" stroke-dasharray="4" stroke-width="1"/>',
