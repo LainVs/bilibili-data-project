@@ -18,6 +18,13 @@ a = Analysis(
         (str(ROOT / "config"), "config"),
     ],
     hiddenimports=[
+        # CLI 命令模块（main._dispatch 内延迟导入，静态分析可能漏掉）
+        "commands.basic",
+        "commands.crawl",
+        "commands.stats",
+        "commands.tools",
+        "commands.export",
+        "commands.analyze",
         # 各采集任务模块（GUI 按需延迟导入）
         "crawler.tasks.full",
         "crawler.tasks.increment",

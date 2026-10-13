@@ -10,7 +10,9 @@
     python main.py serve                       # 定时增量后台运行
     python main.py up <UID>                    # 按 UP 主批量采集其全部视频评论
     python main.py post <链接或ID>              # 采集帖子/动态/专栏评论
-    python main.py resolvecache BV1xx          # 对已入库弹幕执行 mid_hash->UID 反查
+    python main.py resolve BV1xx               # 对已入库弹幕执行 mid_hash->UID 反查
+
+命令实现按族拆分在 commands/ 包中，本文件只负责解析参数与分派。
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="B站弹幕/评论采集与存储")
     sub = parser.add_subparsers(dest="command")
 
-    p_init = sub.add_parser("init", help="初始化数据库与表结构")
+    sub.add_parser("init", help="初始化数据库与表结构")
 
     p_crawl = sub.add_parser("crawl", help="全量采集")
     p_crawl.add_argument("bvids", nargs="+", help="一个或多个 BVID")
@@ -35,11 +37,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_crawl.add_argument("--bvid-file", help="从文件读取 BV 列表(每行一个)")
     p_crawl.add_argument("--incremental", action="store_true", help="增量：只采新评论并跳过已完成")
 
-    p_incr = sub.add_parser("increment", help="增量采集所有已采集视频")
+    sub.add_parser("increment", help="增量采集所有已采集视频")
 
-    p_sched = sub.add_parser("serve", help="启动定时增量调度")
+    sub.add_parser("serve", help="启动定时增量调度")
 
-    p_ver = sub.add_parser("version", help="显示版本")
+    sub.add_parser("version", help="显示版本")
 
     p_resolve = sub.add_parser("resolve", help="对已入库弹幕执行 mid_hash->UID 反查")
     p_resolve.add_argument("bvids", nargs="*", help="一个或多个 BVID；省略则对全库未解析弹幕执行库内 UID 反查")
@@ -111,9 +113,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def read_bvid_file(path: str) -> list[str]:
-    with open(path, encoding="utf-8") as fh:
-        return [line.strip() for line in fh if line.strip() and not line.startswith("#")]
+def _dispatch(command: str):
+    """命令名 -> run(args)->int 处理器；未知命令返回 None。"""
+    from commands import analyze, basic, crawl, export, stats, tools
+
+    return {
+        "init": basic.run_init,
+        "version": basic.run_version,
+        "gui": basic.run_gui,
+        "crawl": crawl.run_crawl,
+        "increment": crawl.run_increment,
+        "serve": crawl.run_serve,
+        "up": crawl.run_up,
+        "post": crawl.run_post,
+        "stats": stats.run_stats,
+        "resolve": stats.run_resolve,
+        "crack": tools.run_crack,
+        "doctor": tools.run_doctor,
+        "export": export.run_export,
+        "detect": analyze.run_detect,
+        "report": analyze.run_report,
+        "iptrace": analyze.run_iptrace,
+    }.get(command)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,342 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging()
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
-    if args.command == "init":
-        from storage.db import init_db
-
-        init_db()
-        logger.info("数据库初始化完成")
-        return 0
-
-    if args.command == "version":
-        print("bilibili-data-project 0.1.0")
-        return 0
-
-    if not args.command or args.command == "gui":
-        from gui.main_window import run as run_gui
-
-        run_gui()
-        return 0
-
-    if args.command == "stats":
-        from analysis import stats_service as _svc
-
-        if args.overview and not args.keyword and not args.export and not args.charts:
-            stats = _svc.get_overview()
-            print(_svc.describe_overview(stats))
-            for name, val in _svc.overview_export_rows(stats):
-                print(f"{name}: {val:,}")
-            return 0
-        stats = _svc.get_overview()
-        print("【总览】" + _svc.describe_overview(stats))
-        rows = _svc.sample_texts_for_insight(limit=args.limit, keyword=args.keyword)
-        ins = _svc.compute_insights(rows, top=args.top, days=args.days)
-        print("【洞察】" + _svc.insights_summary(ins))
-        for t in (ins.get("terms") or [])[: args.top]:
-            print(f"  {t['term']}: {t['cnt']}")
-        if args.export:
-            _svc.export_overview_csv(stats, args.export.replace(".csv", "_overview.csv")
-                                     if "_overview" not in args.export and "_insight" not in args.export
-                                     else args.export)
-            _svc.export_insights_csv(ins, args.export.replace(".csv", "_insights.csv")
-                                     if "_overview" not in args.export and "_insight" not in args.export
-                                     else args.export)
-            print(f"已导出：{args.export}")
-        if args.charts:
-            from visualization import charts as _charts
-            paths = _charts.render_all(ins, args.charts)
-            print("图表：" + str(paths))
-        return 0
-
-    if args.command == "up":
-        from config import get_config
-        from crawler.api.client import ApiClient
-        from crawler.tasks.up_crawl import crawl_up_videos
-
-        cfg = get_config()
-        if not cfg.cookie:
-            logger.warning("未配置 Cookie（评论接口需要登录）。请在 config/settings.ini 或环境变量 BILI_COOKIE 中配置")
-        client = ApiClient()
-        with_comments = not args.danmaku_only
-        with_danmaku = not args.comments_only
-        result = crawl_up_videos(
-            client, args.uid,
-            with_comments=with_comments,
-            with_danmaku=with_danmaku,
-            incremental=not args.full,
-            max_pages=args.max_pages,
-            workers=cfg.up_workers,
-        )
-        logger.info("UP采集结果 %s: 视频=%s 新采=%s 评论=%s 弹幕=%s 错误=%s",
-                    args.uid, result["videos"], result["fetched"],
-                    result["comments"], result["danmaku"], result["errors"])
-        return 0
-
-    if args.command == "post":
-        from crawler.api.client import ApiClient
-        from crawler.tasks.post_crawl import crawl_post_link
-
-        client = ApiClient()
-        total = 0
-        for target in args.targets:
-            try:
-                result = crawl_post_link(client, target, incremental=args.incremental)
-                total += result.get("comments", 0)
-                logger.info("帖子采集 %s 评论 %s 条", target, result.get("comments", 0))
-            except Exception as exc:
-                logger.error("帖子采集失败 %s: %s", target, exc)
-        return 0
-
-    if args.command in ("crawl", "increment", "serve"):
-        from config import get_config
-        from crawler.api.client import ApiClient
-
-        cfg = get_config()
-        if not cfg.cookie:
-            logger.warning("未配置 Cookie（评论接口需要登录）。请在 config/settings.ini 或环境变量 BILI_COOKIE 中配置")
-        client = ApiClient()
-
-        if args.command == "crawl":
-            bvids = list(args.bvids or [])
-            if args.bvid_file:
-                bvids.extend(read_bvid_file(args.bvid_file))
-            if not bvids:
-                logger.error("请提供至少一个 BV 或 --bvid-file")
-                return 2
-            from crawler.tasks.full import crawl_one_video
-
-            with_comments = not args.danmaku_only
-            with_danmaku = not args.comments_only
-            for bvid in bvids:
-                if args.incremental:
-                    from storage import dao
-
-                    meta = dao.find_video_by_bvid(bvid)
-                    if meta:
-                        row = dao.get_progress(meta["aid"]) or {}
-                        done = (not with_comments or bool(row.get("comment_done"))) and \
-                               (not with_danmaku or bool(row.get("danmaku_done")))
-                        if done:
-                            logger.info("跳过已完成 %s (增量模式)", bvid)
-                            continue
-                stats = crawl_one_video(client, bvid, with_comments=with_comments, with_danmaku=with_danmaku,
-                                        incremental=args.incremental)
-                logger.info("采集结果 %s: 评论=%s 弹幕=%s 错误=%s",
-                            bvid, stats["comments"], stats["danmaku"], stats["errors"])
-            return 0
-
-        if args.command == "increment":
-            from crawler.tasks.increment import incremental_update
-            from storage import dao
-
-            aids = dao.list_all_video_aids()
-            if not aids:
-                logger.info("无已采集视频，跳过增量")
-                return 0
-            incremental_update(client, aids)
-            return 0
-
-        if args.command == "serve":
-            from crawler.tasks.scheduler import start_scheduler
-
-            scheduler = start_scheduler(client)
-            logger.info("后台增量调度运行中，Ctrl-C 退出")
-            try:
-                import time
-
-                while True:
-                    time.sleep(3600)
-            except KeyboardInterrupt:
-                scheduler.shutdown(wait=False)
-                return 0
-
-    if args.command == "resolve":
-        from crawler.tasks.resolve_uid import resolve_all_from_library, resolve_batch
-
-        if args.all or not args.bvids:
-            result = resolve_all_from_library()
-            logger.info("库内反查结果: %s", result)
-            return 0
-        for bvid in args.bvids:
-            result = resolve_batch(bvid)
-            logger.info("反查结果 %s: %s", bvid, result)
-        return 0
-
-    if args.command == "crack":
-        from crc32_crack.core import crack_candidates, crack_fast
-        for h in args.hashes:
-            h = h.strip().lower()
-            if args.all:
-                cands = crack_candidates(h)
-                if cands:
-                    print(f"{h} -> {len(cands)} 个候选: {cands} (推荐主候选: {cands[0]})")
-                else:
-                    print(f"{h} -> 未能破解")
-            else:
-                uid = crack_fast(h)
-                if uid is not None:
-                    print(f"{h} -> UID: {uid}")
-                else:
-                    print(f"{h} -> 未能破解")
-        return 0
-
-    if args.command == "doctor":
-        from tools.doctor import print_doctor_report
-        print_doctor_report()
-        return 0
-
-    if args.command == "export":
-        import etl
-        from storage import dao
-
-        rows = []
-        mapping = None
-        t = args.type
-        lim = args.limit if args.limit > 0 else 500000
-
-        if t == "comments":
-            mapping = etl.COMMENT_FIELDS
-            if args.uid:
-                rows = dao.query_comments_by_uid(args.uid, limit=lim)
-            elif args.bvid:
-                meta = dao.find_video_by_bvid(args.bvid)
-                if meta:
-                    rows = dao.query_comments_by_video(meta["aid"], limit=lim)
-            else:
-                res = dao.search_comments("的", limit=lim)
-                rows = res.get("rows", [])
-        elif t == "danmaku":
-            mapping = etl.DANMAKU_FIELDS
-            if args.uid:
-                rows = dao.query_danmaku_by_uid(args.uid, limit=lim)
-            elif args.bvid:
-                meta = dao.find_video_by_bvid(args.bvid)
-                if meta:
-                    rows = dao.query_danmaku_by_video(meta["aid"], limit=lim)
-            else:
-                res = dao.search_danmaku("的", limit=lim)
-                rows = res.get("rows", [])
-        elif t == "videos":
-            mapping = etl.VIDEO_FIELDS
-            rows = dao.query_recent_videos(limit=lim if lim < 500000 else None)
-        elif t == "users":
-            mapping = etl.USER_FIELDS
-            if args.uid:
-                u = dao.query_user(args.uid)
-                rows = [u] if u else []
-            else:
-                top_users = dao.query_up_stats()
-                rows = [{"uid": r["mid"], "uname": r.get("uname", ""), "fans": 0, "level": 0, "sex": "", "is_vip": 0, "signature": ""} for r in top_users[:lim]]
-
-        if args.format == "csv":
-            count = etl.export_to_csv(rows, args.output, field_mapping=mapping)
-            print(f"[OK] 成功导出 {count} 条记录到 {args.output}")
-        elif args.format == "jsonl":
-            count = etl.export_to_jsonl(rows, args.output)
-            print(f"[OK] 成功导出 {count} 条记录到 {args.output}")
-        elif args.format in ("sqlite", "db"):
-            if args.bvid:
-                bundle = etl.export_video_bundle(args.bvid, args.output, format="sqlite", limit=args.limit)
-                print(f"[OK] 成功打包视频完整 SQLite 数据库到 {bundle['path']} (总计 {bundle['total_records']} 条记录, 表明细: {bundle['counts']})")
-            else:
-                table_map = {args.type: rows}
-                counts = etl.export_to_sqlite(table_map, args.output)
-                print(f"[OK] 成功导出 SQLite 数据库到 {args.output} (明细: {counts})")
-        elif args.format in ("xlsx", "excel"):
-            if args.bvid:
-                bundle = etl.export_video_bundle(args.bvid, args.output, format="xlsx", limit=args.limit)
-                print(f"[OK] 成功导出多 Sheet 样式 Excel 到 {bundle['path']} (总计 {bundle['total_records']} 条记录)")
-            else:
-                sheet_data = {t: (mapping, rows)}
-                count = etl.export_to_styled_xlsx(sheet_data, args.output)
-                print(f"[OK] 成功导出样式 Excel 到 {args.output} (共 {count} 条)")
-        return 0
-
-    if args.command == "detect":
-        from analysis import stats_service as _svc
-
-        if hasattr(sys.stdout, "reconfigure"):
-            try:
-                sys.stdout.reconfigure(errors="replace")
-            except Exception:
-                pass
-
-        res = _svc.detect_for_video(
-            bvid=args.bvid, limit=args.limit, top=args.top,
-            repeat_threshold=args.repeat, burst_threshold=args.burst,
-        )
-        meta = res.get("meta") or {}
-        if meta and meta.get("bvid"):
-            print(f"【视频】{meta.get('bvid', '')} {(meta.get('title') or '')[:40]}")
-        print("【检测】" + _svc.detect_summary(res))
-        for r in (res.get("results") or [])[: args.top]:
-            hits = "+".join(r.get("hits") or []) or "-"
-            uname = str(r.get("uname") or "")
-            print(f"  UID={r['uid']:<10} {uname:<16} "
-                  f"发言{r.get('total'):<4} 复读率{r.get('repeat_rate'):<6} "
-                  f"爆发{r.get('burst_max'):<3} 属地{str(r.get('ip_top') or '-'):<4}{r.get('ip_ratio', 0):<5} "
-                  f"评分{r.get('score'):<5} [{r.get('level'):<7}] {hits}")
-        if args.export:
-            _svc.export_detect_csv(res.get("results") or [], args.export)
-            print(f"已导出：{args.export}")
-        return 0
-
-    if args.command == "report":
-        from reporting import ReportSections, generate_report
-
-        sec = ReportSections(
-            overview=True,
-            trends=not args.no_trends,
-            sentiment=not args.no_sentiment,
-            terms=not args.no_terms,
-            water_army=not args.no_detect,
-            top_comments=not args.no_comments,
-            interactive_table=not args.no_interactive,
-        )
-        out = args.output.strip() or f"logs/report_{args.bvid}.html"
-        path = generate_report(args.bvid, out, limit=args.limit, sections=sec, auto_sync=args.auto_sync)
-        print(f"[OK] 研报已成功生成: {path}")
-        return 0
-
-    if args.command == "iptrace":
-        from analysis.stats_service import get_user_ip_trajectory, get_video_ip_trajectories
-
-        if hasattr(sys.stdout, "reconfigure"):
-            try:
-                sys.stdout.reconfigure(errors="replace")
-            except Exception:
-                pass
-
-        if args.uid > 0:
-            traj = get_user_ip_trajectory(args.uid)
-            uname = traj.get("uname") or f"UID:{args.uid}"
-            print(f"=== 用户属地迁移轨迹分析: {uname} (UID: {args.uid}) ===")
-            print(f"【概况】{traj['summary']}")
-            print(f"【指标】总发言: {traj['total_records']} | 有效属地: {traj['valid_records']} | 涉及属地: {traj['distinct_count']} 个 | 迁移次数: {traj['jump_count']} | 瞬移次数: {traj['teleport_count']} | 风险评级: [{traj['risk_level']}]")
-
-            if traj.get("transitions"):
-                print("\n【迁移跳转时间链】")
-                for i, tr in enumerate(traj["transitions"], 1):
-                    tp_flag = " [!] 疑似瞬移" if tr["is_teleport"] else ""
-                    print(f"  {i}. {tr['from_ip']} -> {tr['to_ip']}{tp_flag}")
-                    print(f"     起止: {tr['from_time']} -> {tr['to_time']} (间隔 {tr['interval_hours']:.1f}h)")
-                    print(f"     距离: {tr['distance_km']:.0f} km | 隐含时速: {tr['speed_kmh']:,.0f} km/h | 判定: {tr['flag']}")
-            return 0
-        else:
-            bvid = args.bvid.strip()
-            trajs = get_video_ip_trajectories(bvid=bvid, limit=args.limit, top=args.top)
-            label = f"视频 {bvid}" if bvid else "库内抽样"
-            print(f"=== {label} 观众群 IP 属地跳跃与瞬移批量排查 ===")
-            print(f"共发现 {len(trajs)} 名存在多地流转/异常跳跃的用户 (按瞬移次数与迁移频度降序):")
-            for t in trajs:
-                chain = " -> ".join(t.get("distinct_ips", []))
-                tp = f" [瞬移 {t['teleport_count']} 次]" if t['teleport_count'] > 0 else ""
-                print(f"  UID={t['uid']:<10} {str(t.get('uname') or ''):<16} 流转{t['jump_count']:<2}次{tp} "
-                      f"最高时速{t['max_speed_kmh']:<8,.0f} km/h [{t['risk_level']:<6}] 轨迹: {chain}")
-            return 0
-
-    logger.error("未知命令: %s", args.command)
-    return 2
+    # 无子命令等价于启动 GUI（保持历史行为）
+    handler = _dispatch(args.command or "gui")
+    if handler is None:
+        logger.error("未知命令: %s", args.command)
+        return 2
+    return handler(args)
 
 
 if __name__ == "__main__":
