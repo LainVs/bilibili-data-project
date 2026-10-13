@@ -512,13 +512,16 @@ class CollectPanel(ttk.Frame):
     def _show_stored(self, v: dict, comments: list, danmaku: list) -> None:
         self._clear_stream()
         self.txt.configure(wrap="word")
-        self._append_line(f"==== 库内内容 | {v.get('bvid', '')} | {v.get('title', '')[:60]} ====")
-        self._append_line(f"-- 评论 {len(comments)} 条（含回复）--")
-        for c in comments:
-            self._append_line(format_comment_line(c))
-        self._append_line(f"-- 弹幕 {len(danmaku)} 条 --")
-        for d in danmaku:
-            self._append_line(format_danmaku_line(d))
+        # 批量写入：逐行 _append_line 会对每行做 4 次 widget 操作 + 触发重绘，
+        # 上千行时明显卡顿；_append_batch 单次事务插入，快得多。
+        lines = [
+            f"==== 库内内容 | {v.get('bvid', '')} | {v.get('title', '')[:60]} ====",
+            f"-- 评论 {len(comments)} 条（含回复）--",
+        ]
+        lines.extend(format_comment_line(c) for c in comments)
+        lines.append(f"-- 弹幕 {len(danmaku)} 条 --")
+        lines.extend(format_danmaku_line(d) for d in danmaku)
+        self._append_batch(lines)
         self.lbl_status.configure(text=f"已加载库内内容：评论 {len(comments)} 条 / 弹幕 {len(danmaku)} 条（滚动查看）")
         self._stick_bottom = False
         self._see_top()
