@@ -15,10 +15,17 @@
 ## 快速开始
 
 ```bash
+# 核心依赖（采集/存储/调度/报表）
 pip install -r requirements.txt
 
+# 可选：统计面板的折线/柱状图需要 matplotlib（缺失时面板自动降级为文字+表格，不报错）
+pip install matplotlib
+
+# 可选：开发依赖（ruff + pytest + pre-commit）
+pip install -r requirements-dev.txt
+
 # 1. 配置 config/settings.ini（MySQL 密码 + B站登录 Cookie）
-# 或设置环境变量 BILI_COOKIE
+# 或设置环境变量 BILI_COOKIE；Cookie 也可单放 config/bili_cookie.txt
 
 # 2. 初始化数据库表
 python main.py init
@@ -36,15 +43,18 @@ python main.py serve
 其他:
 - `python main.py doctor` 系统全链路环境与健康体检（DB、Cookie、磁盘、跑分）
 - `python main.py crack 1ad5be0d --all` 弹幕 mid_hash 毫秒级逆向破解
+- `python main.py stats --overview` 总览 10 项指标；`stats --charts logs/charts` 渲染趋势图
 - `python main.py iptrace --uid 123456` 查询指定用户的 IP 属地迁徙轨迹、流转时序链与瞬移风险判定
 - `python main.py iptrace --bvid BV18q4y1V7pM` 批量排查指定视频观众中的多地跳跃与代理池瞬移账号
 - `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集+异地瞬移综合打分，GUI「统计洞察」面板同步可用）
-- `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持双滑块时间视窗动态缩放、多维交互式检索评论表格、情感/属地即时筛选）
+- `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持双滑块时间视窗动态缩放、多维交互式检索评论表格、情感/属地即时筛选）；加 `--no-sync` 可仅用本地数据离线生成、不联网补采
 - `python main.py export --bvid BV18q4y1V7pM --format sqlite --output bundle.sqlite` 打包视频全量生态数据为独立便携 SQLite 数据库（无视 MySQL 环境，任何机器双击秒开）
 - `python main.py export --bvid BV18q4y1V7pM --format xlsx --output bundle.xlsx` 导出带有 Claude 质感排版、冻结表头与斑马纹的多 Sheet 格式化 Excel
-- `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv` 数据快速导出 (CSV / JSONL / XLSX / SQLite)
+- `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv --limit 5000` 数据快速导出 (CSV / JSONL / XLSX / SQLite)
 - `python main.py crawl --comments-only BVID` 只采评论
 - `python main.py crawl --bvid-file list.txt` 批量采集
+- `python main.py up <UID>` 按 UP 主批量采集其全部视频
+- `python main.py post <链接或ID>` 采集帖子/动态/专栏评论
 - `python main.py increment` 手动增量
 - `python main.py version`
 
@@ -55,19 +65,23 @@ python main.py serve
 - **系统体检诊断 (`tools/doctor.py`)**：一键检测双库（D/E）延迟、Cookie 有效期、磁盘空间及算法引擎跑分。
 - **统计 V2 与可视化 (`analysis/` + `visualization/`)**：总览 10 项指标 + 5 大排行榜导出 + 趋势洞察（高频词、情感分布、24小时活跃度、每日趋势折线图）。
 - **GUI 交互优化**：支持 `b23.tv` 短链重定向自动解析、正则精确识别 BV 号、用户查询导出全部解锁、排行榜一键导出。
+- **工程化保障**：`ruff` 静态检查 + `pre-commit` 钩子 + GitHub Actions CI（Python 3.10/3.12 跑 lint 与单测）；核心写入路径（`storage/dao`）、异步写线程与 API 客户端均有离线单元测试。
 
 ## 目录结构
 
 ```
+main.py           # CLI 入口（参数解析 + 命令分派）
+commands/         # CLI 子命令实现（basic/crawl/stats/tools/export/analyze）
 crawler/          # 采集层(API封装/清洗管道/任务编排/限速风控)
-storage/          # MySQL 双库管理(D写缓冲/E归档小仓库/DAO/线程复用)
+storage/          # MySQL 双库管理(D写缓冲/E归档小仓库/线程复用)
+  └ dao/          #   数据访问层包（_core 基础设施 / search 检索 / rankings 榜单）
 crc32_crack/      # mid_hash -> UID 极速逆向破解(MITM算法)
 etl/              # ETL清洗规范化、维度聚合与多格式导出(CSV/JSONL)
 reporting/        # 网页研报生成引擎(零依赖单文件HTML离线研报/SVG图表)
 analysis/         # 文本分析与统计服务层(高频词/情感/时段)
 visualization/    # 数据图表生成(matplotlib折线/柱状图)
 gui/              # 桌面客户端(Obsidian单面板风格)
-tools/            # 数据库迁移、体检诊断与限速探针
+tools/            # 数据库迁移、体检诊断、限速探针与 Cookie 检测
 config/           # 配置文件
 docs/             # 设计与修复记录文档
 tests/            # 单元测试集
@@ -78,4 +92,5 @@ logs/             # 运行与归档日志
 
 - 弹幕 UID 需经 CRC32 反查，**10 位以上 UID 可能解析失败**，属已知限制。
 - 详细方案见 `docs/01-项目方案与讨论记录.md`。
+- 双库（D 写缓冲 / E 归档）的角色划分、连接回退语义与跨仓去重机制见 `docs/03-双库架构.md`。
 - 请以合规、低频率方式使用，勿绕过平台风控。

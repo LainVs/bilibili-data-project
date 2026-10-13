@@ -1,0 +1,8 @@
+# 开发依赖：lint + 测试。
+# 安装：pip install -r requirements-dev.txt
+# （亦可 pip install -e ".[dev]" —— 见 pyproject.toml 的 optional-dependencies）
+-r requirements.txt
+
+pytest>=8.0
+ruff>=0.6
+pre-commit>=3.7
