@@ -10,6 +10,7 @@ import pymysql
 
 from config import get_config
 from gui.theme import C, S
+from gui.util import friendly_error
 from gui.widgets import ClaudeBadge, ClaudeCard, ModernConsole
 
 
@@ -252,7 +253,7 @@ class ConnectionPanel(ttk.Frame):
         except Exception as exc:
             from tkinter import messagebox
 
-            messagebox.showerror("错误", str(exc))
+            messagebox.showerror("错误", friendly_error(exc, "启动写库 D"))
         self.after(3500, self.refresh)
 
     def _admin_stop_d(self) -> None:
@@ -293,7 +294,7 @@ class ConnectionPanel(ttk.Frame):
                 pass
             self.lbl_tip.configure(text="已请求断开 D，5 秒后自动刷新...")
         except Exception as exc:
-            messagebox.showerror("错误", str(exc))
+            messagebox.showerror("错误", friendly_error(exc, "断开写库 D"))
         self.after(5000, self.refresh)
 
     def _admin_stop_e(self) -> None:
@@ -334,7 +335,7 @@ class ConnectionPanel(ttk.Frame):
                 pass
             self.lbl_tip.configure(text="已请求断开 E，5 秒后自动刷新...")
         except Exception as exc:
-            messagebox.showerror("错误", str(exc))
+            messagebox.showerror("错误", friendly_error(exc, "断开归档库 E"))
         self.after(5000, self.refresh)
 
     def _admin_start_e(self) -> None:
@@ -397,7 +398,7 @@ net start MySQL80-E 2>&1 | Out-Host
         except Exception as exc:
             from tkinter import messagebox
 
-            messagebox.showerror("错误", str(exc))
+            messagebox.showerror("错误", friendly_error(exc, "启动/修复归档库 E"))
         self.after(15000, self.refresh)
 
     def _cancel_archive(self) -> None:

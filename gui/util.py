@@ -1,6 +1,7 @@
 """GUI 通用工具：视频列表加载、内容格式化。"""
 from __future__ import annotations
 
+import contextlib
 import datetime
 import logging
 import re
@@ -48,6 +49,55 @@ def resolve_short_link(url: str) -> str:
     except Exception as exc:
         logger.warning("短链解析失败 %s: %s", url, exc)
         return ""
+
+
+def friendly_error(exc: Exception, action: str = "") -> str:
+    """把底层异常翻译成用户可读、可行动的中文提示（详情仍进日志）。
+
+    常见场景给出针对性建议，其余回退为「操作 + 简要原因」，
+    避免把英文的 pymysql/urllib 内部异常原文直接甩给用户。
+    """
+    detail = str(exc).strip()
+    low = detail.lower()
+    head = f"{action}失败" if action else "操作失败"
+
+    if any(k in low for k in ("10061", "connection refused", "can't connect", "actively refused")):
+        return (f"{head}：无法连接数据库服务。\n"
+                f"请在「连接」面板确认 MySQL 已启动，或点击「管理员重连 D/E」。")
+    if any(k in low for k in ("access denied", "1045")):
+        return f"{head}：数据库账号或密码不正确。\n请在「数据库配置」中核对用户名/密码。"
+    if any(k in low for k in ("unknown database", "1049")):
+        return f"{head}：目标数据库不存在。\n请先执行 `python main.py init` 初始化，或检查库名。"
+    if "timed out" in low or "timeout" in low:
+        return f"{head}：连接超时。\n请检查网络/数据库负载，稍后重试。"
+    if any(k in low for k in ("permission denied", "errno 13", "access is denied")):
+        return f"{head}：文件或目录无写入权限。\n请换个可写路径，或以管理员身份运行。"
+    if "no such file" in low or "cannot find" in low:
+        return f"{head}：找不到指定文件或路径。\n请确认路径正确后重试。"
+    # 兜底：动作 + 简要原因（截断，避免超长内部报错刷屏）
+    reason = detail[:200] if detail else exc.__class__.__name__
+    return f"{head}：{reason}\n（详细堆栈见 logs/ 日志）"
+
+
+@contextlib.contextmanager
+def busy_cursor(widget):
+    """主线程短暂忙等时切「沙漏」光标，结束自动恢复。
+
+    仅用于**主线程**上不可避免的短阻塞；长任务应一律丢后台线程，
+    那时不该占用鼠标光标。
+    """
+    try:
+        widget.configure(cursor="watch")
+        widget.update_idletasks()
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        try:
+            widget.configure(cursor="")
+        except Exception:
+            pass
 
 
 def ping_main(widget, label: str) -> None:

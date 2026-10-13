@@ -60,7 +60,7 @@ class SearchPanel(ttk.Frame):
                 if item is None:
                     self._searching = False
                     self.btn_search.configure(state="normal", text="搜索", style="Accent.TButton")
-                    self.lbl_hint.configure(text="搜索出错，详见日志")
+                    self.lbl_hint.configure(text="搜索出错")
                 elif isinstance(item, tuple):
                     if item and item[0] == "cmt_partial":
                         self._apply_cmt_partial(*item[1:])
@@ -457,7 +457,12 @@ class SearchPanel(ttk.Frame):
         self._searching = False
         self.btn_search.configure(state="normal", text="搜索", style="Accent.TButton")
         if results is None:
-            self.lbl_hint.configure(text="搜索出错，详见日志")
+            self.lbl_hint.configure(text="搜索出错")
+            messagebox.showerror(
+                "搜索失败",
+                "搜索过程中出现错误。\n"
+                "常见原因：数据库未启动、连接中断，或关键词触发了超长的全表扫描。\n"
+                "详细原因见 logs/ 日志；可先检查「连接」面板后重试。")
             return
         cancelled = any((results.get(s) or {}).get("cancelled")
                         for s in ("cmt", "dmk"))

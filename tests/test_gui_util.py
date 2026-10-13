@@ -56,3 +56,51 @@ def test_find_short_link_absent():
     assert find_short_link("BV18q4y1V7pM") == ""
     assert find_short_link("https://www.bilibili.com/video/BV18q4y1V7pM") == ""
     assert find_short_link("") == ""
+
+
+# ---------- friendly_error（异常 -> 可读中文） ----------
+
+def test_friendly_error_db_down():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("(2003, \"Can't connect to MySQL server on '127.0.0.1' ([WinError 10061])\")"),
+                         "启动写库 D")
+    assert "启动写库 D失败" in msg
+    assert "无法连接数据库服务" in msg
+
+
+def test_friendly_error_access_denied():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("(1045, \"Access denied for user 'root'\")"), "连接")
+    assert "账号或密码不正确" in msg
+
+
+def test_friendly_error_unknown_database():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("(1049, \"Unknown database 'foo'\")"), "连接")
+    assert "数据库不存在" in msg
+
+
+def test_friendly_error_timeout():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("Connection timed out"), "导出")
+    assert "超时" in msg
+
+
+def test_friendly_error_fallback_truncates_and_hints_log():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("x" * 500), "操作")
+    assert "操作失败" in msg
+    assert "logs/" in msg
+    assert len(msg) < 400  # 已截断，不刷屏
+
+
+def test_friendly_error_no_action():
+    from gui.util import friendly_error
+
+    msg = friendly_error(Exception("boom"))
+    assert msg.startswith("操作失败")

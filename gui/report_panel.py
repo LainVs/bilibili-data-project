@@ -258,7 +258,7 @@ class ReportPanel(ttk.Frame):
                 self.after(0, lambda: self._on_generate_success(out_path))
             except Exception as exc:
                 logger.exception("生成研报异常: %s", exc)
-                self.after(0, lambda e=str(exc): self._on_generate_failed(e))
+                self.after(0, lambda e=exc: self._on_generate_failed(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -276,13 +276,16 @@ class ReportPanel(ttk.Frame):
             text=f"✓ 研报生成成功！单文件大小: {size_kb:.1f} KB | 路径: {path}\n点击「在浏览器中查看」即可直接查阅或另存为 PDF。"
         )
 
-    def _on_generate_failed(self, error: str) -> None:
+    def _on_generate_failed(self, error) -> None:
         self._is_generating = False
         self.prog.stop()
         self.btn_gen.configure(state="normal", text="一键生成独立研报")
         self.badge_status.set_status("生成失败", status="error")
-        self.lbl_info.configure(text=f"生成失败：{error}")
-        messagebox.showerror("生成失败", f"生成研报遇到错误：\n{error}")
+        from gui.util import friendly_error
+        msg = friendly_error(error, "生成研报") if isinstance(error, Exception) else f"生成研报失败：{error}"
+        # 对话框只显示第一行（摘要），完整说明随详情走
+        self.lbl_info.configure(text=msg.splitlines()[0])
+        messagebox.showerror("生成失败", msg)
 
     def _open_in_browser(self) -> None:
         if not self._last_report_path or not os.path.exists(self._last_report_path):

@@ -7,6 +7,7 @@ settings.ini 结构：
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import tkinter as tk
@@ -16,6 +17,9 @@ import pymysql
 
 from config import get_config, update_mysql_archive_config, update_mysql_config
 from gui.theme import C
+from gui.util import busy_cursor, friendly_error
+
+logger = logging.getLogger(__name__)
 
 try:
     import pymysql.cursors
@@ -377,13 +381,20 @@ class DbConfigDialog(tk.Toplevel):
         except ValueError:
             self._status.configure(text="端口必须是数字", foreground=C.ERROR)
             return False
+        # 连接测试为同步阻塞（每个库 connect_timeout=5s），两个库都不可达时
+        # 可能卡十余秒——期间切沙漏光标，让用户知道程序在忙而非卡死。
+        with busy_cursor(self):
+            return self._test_inner(silent, host, port, user, password, database)
+
+    def _test_inner(self, silent: bool, host, port, user, password, database) -> bool:
         # 写库 D
         try:
             conn = self._connect(host, port, user, password, database)
         except Exception as exc:
-            self._status.configure(text=f"写库D连接失败：{exc}", foreground=C.ERROR)
+            logger.warning("测试连接写库D失败: %s", exc)
+            self._status.configure(text="写库D连接失败", foreground=C.ERROR)
             if not silent:
-                messagebox.showerror("写库失败", f"{exc}\n\n请检查D库 3306 是否启动")
+                messagebox.showerror("写库失败", friendly_error(exc, "连接写库 D"))
             return False
         try:
             with conn.cursor() as cur:
@@ -411,10 +422,11 @@ class DbConfigDialog(tk.Toplevel):
                 messagebox.showinfo("连接成功", msg)
             return True
         except Exception as exc2:
-            msg = f"写库D OK({ver})  归档库E未连通({exc2}) — 采集可用，查询将回退到D"
+            logger.warning("测试连接归档库E失败: %s", exc2)
+            msg = f"写库D OK({ver})  归档库E未连通 — 采集可用，查询将回退到D"
             self._status.configure(text=msg, foreground=C.WARNING)
             if not silent:
-                messagebox.showwarning("归档库未连通", f"{exc2}\n\n写库D正常，归档库E离线时查询将暂时走D，待E上线自动同步。")
+                messagebox.showwarning("归档库未连通", friendly_error(exc2, "连接归档库 E"))
             return True
 
     def _save(self) -> None:
