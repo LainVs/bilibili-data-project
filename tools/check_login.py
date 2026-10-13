@@ -1,7 +1,7 @@
 """快速验证 B站 Cookie（登录态）是否有效。
 
 用法:
-    python tests/check_login.py
+    python tools/check_login.py
 
 逻辑:
   - 从配置读取 cookie（env > bili_cookie.txt > settings.ini）
@@ -10,9 +10,15 @@
 """
 from __future__ import annotations
 
-import requests
+import sys
+from pathlib import Path
 
-from config import get_config
+# 允许 `python tools/check_login.py` 直接运行（把项目根加入 sys.path）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import requests  # noqa: E402
+
+from config import get_config  # noqa: E402
 
 
 def check() -> None:

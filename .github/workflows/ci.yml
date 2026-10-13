@@ -34,8 +34,5 @@ jobs:
 
       - name: Run tests
         # 依赖 MySQL / 网络 / 桌面 GUI 的用例在本环境不可用，仅跑纯离线单元测试。
-        # tests/check_login.py 是手工排查脚本（非 pytest 用例），已显式排除。
         run: |
-          pytest tests/ \
-            --ignore=tests/check_login.py \
-            -p no:cacheprovider
+          pytest tests/ -p no:cacheprovider
