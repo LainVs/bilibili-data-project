@@ -213,3 +213,48 @@ def test_search_and_rankings_live_in_submodules():
     assert dao.get_rankings is rankings.get_rankings
     assert dao.search_comments is search.search_comments
     assert dao.get_hourly_comment_counts is rankings.get_hourly_comment_counts
+
+
+# ---------- 搜索取消 ----------
+
+def test_search_comments_stop_event_breaks_between_shards(monkeypatch):
+    """stop_event 置位后应在仓与仓之间停止，不再遍历后续 shard。"""
+    import threading
+
+    from storage.dao import search as _search
+
+    hit: list[str] = []
+    stop = threading.Event()
+
+    def _fake_one(db, role, kw, start, end, exclude, limit, **kw2):
+        hit.append(db)
+        if db == "bilibili_data":
+            stop.set()  # 首个仓（D 缓冲）查完即触发取消
+        return []
+
+    monkeypatch.setattr(_search, "_shard_dbs", lambda: ["bilibili_s1", "bilibili_s2"])
+    monkeypatch.setattr(_search, "_uid_same_dsn", lambda: False)
+    monkeypatch.setattr(_search, "_search_one_db", _fake_one)
+
+    out = _search.search_comments("kw", limit=10, stop_event=stop)
+    assert hit == ["bilibili_data"], f"应仅在 D 缓冲查一次，实际 {hit}"
+    assert out.get("cancelled") is True
+
+
+def test_search_comments_without_stop_event_scans_all(monkeypatch):
+    """不传 stop_event 时行为不变：D + 各 shard 全部查询。"""
+    from storage.dao import search as _search
+
+    hit: list[str] = []
+
+    def _fake_one(db, role, kw, start, end, exclude, limit, **kw2):
+        hit.append(db)
+        return []
+
+    monkeypatch.setattr(_search, "_shard_dbs", lambda: ["bilibili_s1", "bilibili_s2"])
+    monkeypatch.setattr(_search, "_uid_same_dsn", lambda: False)
+    monkeypatch.setattr(_search, "_search_one_db", _fake_one)
+
+    out = _search.search_comments("kw", limit=10)
+    assert hit == ["bilibili_data", "bilibili_s1", "bilibili_s2"]
+    assert "cancelled" not in out

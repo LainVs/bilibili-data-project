@@ -40,17 +40,26 @@ class SearchPanel(ttk.Frame):
         self._last_min_like = 0
         self._sec_rows: dict[str, list[dict]] = {"cmt": [], "dmk": [], "video": []}
         self._list_iids: dict[str, dict] = {}  # iid -> 完整行（用于双击详情）
+        # 搜索取消信号：置位后在仓与仓之间尽早停止（见 dao.search_comments）
+        self._search_stop = threading.Event()
+        self._searching = False
+        self._poll_after_id = None
         self._build_ui()
         self.start_polling()
 
     def start_polling(self) -> None:
-        """主线程周期排污搜索结果队列（每 150ms），线程安全回填 UI。"""
-        self.after(150, self.start_polling)
+        """主线程周期排污搜索结果队列（每 150ms），线程安全回填 UI。
+
+        仅在「有在途搜索或队列非空」时重排；空闲时停表，避免每秒 6~7 次
+        空转唤醒（用 _kick_poll 在开始搜索时重新启动）。
+        """
+        self._poll_after_id = None
         try:
             while True:
                 item = self._search_q.get_nowait()
                 if item is None:
-                    self.btn_search.configure(state="normal", text="搜索")
+                    self._searching = False
+                    self.btn_search.configure(state="normal", text="搜索", style="Accent.TButton")
                     self.lbl_hint.configure(text="搜索出错，详见日志")
                 elif isinstance(item, tuple):
                     if item and item[0] == "cmt_partial":
@@ -59,6 +68,14 @@ class SearchPanel(ttk.Frame):
                         self._apply(*item)
         except queue.Empty:
             pass
+        # 有在途搜索或还有残留消息 → 继续轮询；否则停表省电
+        if self._searching or not self._search_q.empty():
+            self._poll_after_id = self.after(150, self.start_polling)
+
+    def _kick_poll(self) -> None:
+        """开始搜索时调用：确保排污轮询在运行。"""
+        if getattr(self, "_poll_after_id", None) is None:
+            self._poll_after_id = self.after(150, self.start_polling)
 
     # ---------------- 会话状态（重启恢复） ----------------
     def snapshot_state(self) -> dict:
@@ -143,7 +160,7 @@ class SearchPanel(ttk.Frame):
         self.var_sort = tk.StringVar(value="时间倒序")
         ttk.Combobox(top, textvariable=self.var_sort, width=8, state="readonly",
                      values=["时间倒序", "点赞倒序"]).pack(side="left", padx=(8, 0))
-        self.btn_search = ttk.Button(top, text="搜索", style="Accent.TButton", command=self._search)
+        self.btn_search = ttk.Button(top, text="搜索", style="Accent.TButton", command=self._toggle_search)
         self.btn_search.pack(side="left", padx=(10, 0))
         self.btn_export = ttk.Button(top, text="导出命中CSV", command=self._export,
                                      state="disabled")
@@ -343,6 +360,15 @@ class SearchPanel(ttk.Frame):
             pass
 
     # ---------------- 搜索 ----------------
+    def _toggle_search(self) -> None:
+        """搜索按钮：空闲时发起搜索，搜索中则请求取消。"""
+        if self._searching:
+            self._search_stop.set()
+            self.btn_search.configure(text="正在停止…", state="disabled")
+            self.lbl_hint.configure(text="正在停止搜索…（当前仓查完后即停）")
+            return
+        self._search()
+
     def _search(self) -> None:
         kw = self.var_kw.get().strip()
         if not kw:
@@ -377,12 +403,16 @@ class SearchPanel(ttk.Frame):
 
         hint = "搜索中…"
         if _terms and all(len(t) < 2 for t in _terms):
-            hint = "单字关键词走全表扫描，需要几十秒，请耐心等待…"
+            hint = "单字关键词走全表扫描，需要几十秒，可随时点「停止」中断…"
         self.lbl_hint.configure(text=hint)
-        self.btn_search.configure(state="disabled", text="搜索中…")
+        self._searching = True
+        self._search_stop.clear()
+        self.btn_search.configure(state="normal", text="停止", style="Danger.TButton")
+        self._kick_poll()  # 启动排污轮询（空闲时它已停表）
         # 搜索代际：旧搜索的残留回调直接丢弃，防止覆盖新结果
         self._search_gen = getattr(self, "_search_gen", 0) + 1
         my_gen = self._search_gen
+        stop_event = self._search_stop
         # 流式前先清空评论区，避免新旧混排
         self._sec_rows["cmt"] = []
         self._stream_total = 0
@@ -392,7 +422,8 @@ class SearchPanel(ttk.Frame):
                 self._search_q.put(("cmt_partial", my_gen, db_label, rows))
             try:
                 results = self._query(sources, kw, start, end, limit, exclude,
-                                      cmt_cb=_on_shard, min_like=min_like)
+                                      cmt_cb=_on_shard, min_like=min_like,
+                                      stop_event=stop_event)
             except Exception:
                 logger.exception("搜索失败")
                 results = None
@@ -423,10 +454,13 @@ class SearchPanel(ttk.Frame):
         # 旧搜索的终局结果直接丢弃
         if gen and gen != getattr(self, "_search_gen", 0):
             return
-        self.btn_search.configure(state="normal", text="搜索")
+        self._searching = False
+        self.btn_search.configure(state="normal", text="搜索", style="Accent.TButton")
         if results is None:
             self.lbl_hint.configure(text="搜索出错，详见日志")
             return
+        cancelled = any((results.get(s) or {}).get("cancelled")
+                        for s in ("cmt", "dmk"))
         try:
             from gui.util import ping_main as _ping
             _ping(self, "全局搜索")
@@ -440,6 +474,8 @@ class SearchPanel(ttk.Frame):
         self._last_min_like = min_like
         self._page = 0
         self._push_history(kw)
+        if cancelled:
+            self.lbl_hint.configure(text="已停止搜索（仅显示停止前已完成的仓）")
 
         # 汇总与截断提示
         shown = {"cmt": len(self._sec_rows["cmt"]),
@@ -485,15 +521,18 @@ class SearchPanel(ttk.Frame):
         self._render_sec()
 
     def _query(self, sources: dict, kw: str, start: str, end: str, limit: int,
-               exclude: str = "", cmt_cb=None, min_like: int = 0) -> dict:
+               exclude: str = "", cmt_cb=None, min_like: int = 0,
+               stop_event=None) -> dict:
         out = {}
         if sources.get("cmt"):
             out["cmt"] = dao.search_comments(kw, start=start, end=end,
                                              exclude=exclude, limit=limit,
-                                             progress_cb=cmt_cb, min_like=min_like)
+                                             progress_cb=cmt_cb, min_like=min_like,
+                                             stop_event=stop_event)
         if sources.get("dmk"):
             out["dmk"] = dao.search_danmaku(kw, start=start, end=end,
-                                            exclude=exclude, limit=limit)
+                                            exclude=exclude, limit=limit,
+                                            stop_event=stop_event)
         if sources.get("video"):
             out["video"] = dao.search_videos(kw, start=start, end=end, limit=limit)
         return out

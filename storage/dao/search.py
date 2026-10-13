@@ -225,11 +225,13 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
 
 
 def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: str = "", limit: int = 100,
-                    progress_cb=None, min_like: int = 0) -> dict:
+                    progress_cb=None, min_like: int = 0, stop_event=None) -> dict:
     """跨库搜评论。D 写缓冲最先查（全文索引秒出首屏），E 各仓随后逐仓回调。
 
     progress_cb(db_label, rows): 每完成一仓立即回调，GUI 流式展示。
     min_like: 只要点赞数 >= 该值的评论（找高赞神评）。
+    stop_event: 可选 threading.Event；置位后在仓与仓之间尽早停止（不可中断
+    正在执行的单仓查询，但能避免继续遍历后续仓），返回已得结果。
     查询语法：空格/逗号=同时包含，OR/|=任一包含，"引号"=精确短语。
     """
     keyword = (keyword or "").strip()
@@ -262,6 +264,9 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
         failed.append(f"D缓冲:{exc}")
         logger.warning("搜评论 D缓冲 跳过: %s", exc)
     for db in dbs:
+        if stop_event is not None and stop_event.is_set():
+            logger.info("搜评论被用户取消，已停于 %s 仓之前", db)
+            break
         if _uid_same_dsn() and db == "bilibili_data":
             continue  # 单库模式：D 与 E 主库同一物理库，避免重复
         try:
@@ -278,6 +283,8 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
         {"rows": all_rows[:limit], "total": None if len(all_rows) > limit else len(all_rows)}
     if failed:
         out["failed"] = failed
+    if stop_event is not None and stop_event.is_set():
+        out["cancelled"] = True
     return out
 
 
@@ -421,7 +428,7 @@ def _search_danmaku_one_db(db: str, role: str, groups: list[list[str]], start: s
 
 
 def search_danmaku(keyword: str, *, start: str = "", end: str = "",
-                   exclude: str = "", limit: int = 100) -> dict:
+                   exclude: str = "", limit: int = 100, stop_event=None) -> dict:
     """跨库搜弹幕（ngram 全文索引）或发送者标识（mid_hash/uid LIKE）。
 
     D 缓冲 + E 各仓逐库查，Python 按时间归并、按 id 去重。
@@ -453,6 +460,9 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
         failed.append(f"D缓冲:{exc}")
         logger.warning("搜弹幕 D缓冲 跳过: %s", exc)
     for db in (_shard_dbs() or ["bilibili_data"]):
+        if stop_event is not None and stop_event.is_set():
+            logger.info("搜弹幕被用户取消，已停于 %s 仓之前", db)
+            break
         if _uid_same_dsn() and db == "bilibili_data":
             continue
         try:
@@ -465,6 +475,8 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
         {"rows": all_rows[:limit], "total": None if len(all_rows) > limit else len(all_rows)}
     if failed:
         out["failed"] = failed
+    if stop_event is not None and stop_event.is_set():
+        out["cancelled"] = True
     return out
 
 
