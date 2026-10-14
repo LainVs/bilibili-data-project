@@ -33,6 +33,7 @@ class StatsPanel(ttk.Frame):
         self._stats_q: queue.Queue = queue.Queue()
         self._db_q: queue.Queue = queue.Queue()
         self._poll_after_id = None
+        self._last_work_ts = time.monotonic()  # 最近一次收到统计进度的时间
         self._build_ui()
         self.start_polling()
         self._load_cached()
@@ -119,6 +120,7 @@ class StatsPanel(ttk.Frame):
         try:
             while True:
                 payload = self._stats_q.get_nowait()
+                self._last_work_ts = time.monotonic()
                 if isinstance(payload, tuple) and len(payload) > 3 and payload[3] == "rank_partial":
                     self._apply_rank_partial(payload)
                 elif isinstance(payload, tuple) and payload and payload[0] == "stat_partial":
@@ -144,10 +146,22 @@ class StatsPanel(ttk.Frame):
         try:
             while True:
                 info = self._db_q.get_nowait()
+                self._last_work_ts = time.monotonic()
                 self._apply_db_info(info)
         except queue.Empty:
             pass
         if self._has_active_work():
+            # 慢查询看门狗：统计线程还活着却长时间没进度，说明归档库(HDD)在
+            # 全表扫描——给出“查询较慢”提示，避免用户以为程序卡死。
+            th = getattr(self, "_stats_thread", None)
+            if th is not None and th.is_alive() and not getattr(self, "_stats_stop", threading.Event()).is_set():
+                idle = time.monotonic() - self._last_work_ts
+                if idle > 45:
+                    try:
+                        self._overlay.configure(
+                            text="⏳ 归档库查询较慢（HDD 全表扫描中）…可点「取消统计」中止")
+                    except tk.TclError:
+                        pass
             self._poll_after_id = self.after(200, self.start_polling)
 
     def _has_active_work(self) -> bool:
@@ -783,13 +797,17 @@ class StatsPanel(ttk.Frame):
         点击时若正在统计，则取消本次统计。
         """
         if getattr(self, "_stats_thread", None) and self._stats_thread.is_alive():
-            # 协作式取消：发信号后按钮置“取消中…”禁用，等线程真正退出再恢复
-            # （dao 层查完当前仓即停；在途单条 SQL 最多等到 read 超时）
+            # 协作式取消：发信号 + 强制断开在途 SQL 连接（否则单次 HDD 全表扫描
+            # 最多阻塞到 read_timeout=600s，点取消也像“卡死”无反应）。
             self._stats_stop.set()
+            try:
+                dao.cancel_stats_queries()
+            except Exception:
+                pass
             self.btn_refresh.configure(state="disabled", text="取消中…")
             self.btn_stats_only.configure(state="disabled", text="取消中…")
             try:
-                self._overlay.configure(text="正在取消…查完当前仓即停")
+                self._overlay.configure(text="正在取消…已中断在途查询，稍候")
             except tk.TclError:
                 pass
             self.after(500, self._check_cancel_join)
@@ -815,6 +833,7 @@ class StatsPanel(ttk.Frame):
         max_prog_steps = 10 if mode == "stats_only" else (10 + rank_count)
 
         self._stats_stop = threading.Event()
+        self._last_work_ts = time.monotonic()
         # 允许点击取消，所以保持可点
         self.btn_refresh.configure(state="normal", text="取消统计" if mode=="full" else "刷新")
         self.btn_stats_only.configure(state="normal" if mode!="full" else "disabled")

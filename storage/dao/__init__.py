@@ -21,14 +21,18 @@ from storage.dao._core import (
     _SHARD_CACHE,
     _SHARD_TTL,
     StatsCancelled,
+    _begin_stats_run,
     _drop_cached,
+    _end_stats_run,
     _open_conn,
     _rcached,
     _rclose_all,
     _shard_dbs,
     _shard_dbs_trusted,
+    _stats_should_abort,
     _tls,
     _uid_same_dsn,
+    cancel_stats_queries,
     logger,
 )
 from storage.db import ensure_stats_cache_table, ensure_up_stat_table
@@ -1336,7 +1340,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
         if not _list_ok and dbs == ["bilibili_data"]:
             logger.warning("_count shard 列表不可信，仅单库，结果标记部分失败")
             failed.append("_shard_list:untrusted")
-        if stop_event is not None and stop_event.is_set():
+        if _stats_should_abort(stop_event):
             raise StatsCancelled()
 
         def _one(conn, db: str, label: str) -> None:
@@ -1350,7 +1354,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
                 total += n
 
         for db in dbs:
-            if stop_event is not None and stop_event.is_set():
+            if _stats_should_abort(stop_event):
                 raise StatsCancelled()
             try:
                 conn = _rcached("archive", db, 30)
@@ -1359,7 +1363,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
                 logger.warning(f"_count {db} 失败: {e} sql={sql[:60]}")
                 _drop_cached("archive", db, 30)
                 failed.append(db)
-        if stop_event is not None and stop_event.is_set():
+        if _stats_should_abort(stop_event):
             raise StatsCancelled()
         try:
             _one(_rcached("write", "bilibili_data", 30), "bilibili_data", "D缓冲")
@@ -1404,7 +1408,7 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
         # E 离线时 global 读不出：用缓存全量兜底并标记，不显示回退的 D 库残数。
         if key in ("users", "comment_uids"):
             try:
-                if stop_event is not None and stop_event.is_set():
+                if _stats_should_abort(stop_event):
                     raise StatsCancelled()
                 n, ok = (get_global_uid_count() if key == "users"
                          else get_global_comment_uid_count())
@@ -1450,17 +1454,21 @@ def get_collection_stats(progress_cb=None, stop_event=None, stat_done_cb=None) -
                 out["_failed_shards"][key] = ["all"]
         _emit()
 
-    total_jobs = len(jobs)
-    done = 0
-    # HDD 上并发过高会抢 I/O 超时，限 2 并发
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futs = [pool.submit(_run, k, s, f) for k, s, f in jobs]
-        for f in futs:
-            f.result()
-            done += 1
-            if progress_cb:
-                try: progress_cb(done, total_jobs)
-                except Exception: pass
+    _begin_stats_run()
+    try:
+        total_jobs = len(jobs)
+        done = 0
+        # HDD 上并发过高会抢 I/O 超时，限 2 并发
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(_run, k, s, f) for k, s, f in jobs]
+            for f in futs:
+                f.result()
+                done += 1
+                if progress_cb:
+                    try: progress_cb(done, total_jobs)
+                    except Exception: pass
+    finally:
+        _end_stats_run()
     return out
 
 
@@ -2224,9 +2232,10 @@ from storage.dao.search import (  # noqa: E402
 # 这既是文档也是给 ruff 的信号——重导出是有意的，不是死导入。
 __all__ = [
     # 基础设施 / 共享状态（自 _core 重导出）
-    "StatsCancelled", "_SHARD_CACHE", "_SHARD_TTL", "_drop_cached",
-    "_open_conn", "_rcached", "_rclose_all", "_shard_dbs", "_shard_dbs_trusted",
-    "_tls", "_uid_same_dsn", "logger",
+    "StatsCancelled", "_SHARD_CACHE", "_SHARD_TTL", "_begin_stats_run",
+    "_drop_cached", "_end_stats_run", "_open_conn", "_rcached", "_rclose_all",
+    "_shard_dbs", "_shard_dbs_trusted", "_stats_should_abort", "_tls",
+    "_uid_same_dsn", "cancel_stats_queries", "logger",
     # 搜索子系统（自 search 重导出）
     "parse_smart_query", "flatten_smart_query", "search_comments", "search_danmaku",
     "search_videos", "iter_search_comments", "iter_search_danmaku",

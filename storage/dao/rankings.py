@@ -5,9 +5,12 @@ import threading
 
 from storage.dao._core import (
     StatsCancelled,
+    _begin_stats_run,
     _drop_cached,
+    _end_stats_run,
     _rcached,
     _shard_dbs,
+    _stats_should_abort,
     _uid_same_dsn,
     logger,
 )
@@ -156,7 +159,7 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
         dbs = _shard_dbs()
         all_rows = []
         for db in dbs:
-            if stop_event is not None and stop_event.is_set():
+            if _stats_should_abort(stop_event):
                 raise StatsCancelled()
             try:
                 _t0 = _time.monotonic()
@@ -189,18 +192,22 @@ def get_rankings(*, start: str = "", end: str = "", top: int = 100,
 
     # 串行跑选中的榜（HDD 上多榜并行寻道打架）
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        futs = [pool.submit(_worker, key, sql, params, merge_fn)
-                for key, sql, params, merge_fn in jobs]
-        cancelled = False
-        for f in futs:
-            try:
-                f.result()
-            except StatsCancelled:
-                cancelled = True
-            except Exception as exc:
-                logger.warning("排行榜 worker 异常: %s", exc)
-    if cancelled and (stop_event is not None and stop_event.is_set()):
+    _begin_stats_run()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            futs = [pool.submit(_worker, key, sql, params, merge_fn)
+                    for key, sql, params, merge_fn in jobs]
+            cancelled = False
+            for f in futs:
+                try:
+                    f.result()
+                except StatsCancelled:
+                    cancelled = True
+                except Exception as exc:
+                    logger.warning("排行榜 worker 异常: %s", exc)
+    finally:
+        _end_stats_run()
+    if cancelled and _stats_should_abort(stop_event):
         raise StatsCancelled()
     return out
 

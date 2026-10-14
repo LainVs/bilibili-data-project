@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 import pymysql
 
 from storage import dao
@@ -200,6 +202,9 @@ def test_dao_package_exposes_public_api():
         "_w", "_r", "_r_strict", "_executemany", "_rcached", "_drop_cached",
         "_shard_dbs", "_uid_same_dsn", "_SHARD_CACHE", "_tls", "logger",
         "EArchiveOfflineError", "StatsCancelled",
+        # 统计取消 / 中止控制（让“取消统计”能真正打断在途 SQL）
+        "cancel_stats_queries", "_stats_should_abort",
+        "_begin_stats_run", "_end_stats_run",
     ]
     missing = [n for n in required if not hasattr(dao, n)]
     assert not missing, f"dao 包缺少重导出: {missing}"
@@ -258,3 +263,58 @@ def test_search_comments_without_stop_event_scans_all(monkeypatch):
     out = _search.search_comments("kw", limit=10)
     assert hit == ["bilibili_data", "bilibili_s1", "bilibili_s2"]
     assert "cancelled" not in out
+
+
+def test_stats_cancel_closes_inflight_conns_and_raises():
+    """取消统计：关闭在途连接 + 置位中止，使被阻塞的 SQL 立即抛错并中止。
+
+    模拟 worker 持有两个连接（E 归档 + D 缓冲），主线程调用
+    cancel_stats_queries() 后应关掉它们并让 _stats_should_abort 返回 True，
+    从而在途查询恢复后下一次守卫即抛 StatsCancelled（不再傻等 read_timeout）。
+    """
+    import storage.dao as dao
+    import storage.dao._core as _core
+
+    closed: list[int] = []
+
+    class _FakeConn:
+        def __init__(self, n: int) -> None:
+            self.n = n
+
+        def close(self):
+            closed.append(self.n)
+
+    # 登记两个“在途”连接
+    _core._begin_stats_run()
+    try:
+        _core._stats_conns.add(_FakeConn(1))
+        _core._stats_conns.add(_FakeConn(2))
+        assert _core._stats_should_abort(None) is False
+
+        # 主线程触发取消
+        dao.cancel_stats_queries()
+
+        assert _core._stats_aborted is True
+        assert sorted(closed) == [1, 2]
+        # 守卫现在应当指示中止（无论 stop_event 是否置位）
+        assert _core._stats_should_abort(None) is True
+        assert _core._stats_should_abort(threading.Event()) is True
+    finally:
+        _core._end_stats_run()
+        # 收尾后中止标记应被清除，避免污染下一次统计
+        assert _core._stats_aborted is False
+
+
+def test_stats_cancel_noop_when_idle():
+    """空闲时调用取消不抛错；标记会在下次 begin/end 周期自愈，不污染后续统计。"""
+    import storage.dao as dao
+    import storage.dao._core as _core
+
+    dao.cancel_stats_queries()
+    assert _core._stats_should_abort(None) is True  # 置位立即生效
+    # 下次统计开始即清零，保证不污染新一轮
+    _core._begin_stats_run()
+    _core._end_stats_run()
+    assert _core._stats_aborted is False
+    assert _core._stats_should_abort(None) is False
+

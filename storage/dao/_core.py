@@ -37,8 +37,56 @@ def _open_conn(role: str, db: str, read_timeout: int):
                            read_timeout=read_timeout)
 
 
+# 统计运行控制：让“取消统计”能真正打断在途 SQL，而不是等到 read_timeout。
+# 统计在独立 worker 线程跑，本线程本地连接池 (_tls) 只属于该线程；
+# 主线程点取消时无法直接触达，故用模块级集合登记 worker 当前持有的连接，
+# 取消时由主线程关闭它们——被关连接的 recv 立即抛错，在途 SQL 被迫中断。
+_stats_running = False
+_stats_aborted = False
+_stats_conns: set = set()
+
+
+def _begin_stats_run() -> None:
+    """统计函数入口调用：标记运行 + 清空中止/连接状态。"""
+    global _stats_running, _stats_aborted
+    _stats_running = True
+    _stats_aborted = False
+    _stats_conns.clear()
+
+
+def _end_stats_run() -> None:
+    """统计函数收尾调用：解除运行标记并清空中止标记（供下次运行干净起步）。"""
+    global _stats_running, _stats_aborted
+    _stats_running = False
+    _stats_aborted = False
+    _stats_conns.clear()
+
+
+def cancel_stats_queries() -> None:
+    """取消线程调用：置位中止标记并关闭统计 worker 当前持有的所有读连接，
+    强制打断在途 SQL（否则单次 HDD 全表扫描最多阻塞到 read_timeout=600s）。"""
+    global _stats_aborted
+    _stats_aborted = True
+    for c in list(_stats_conns):
+        try:
+            c.close()
+        except Exception:
+            pass
+    _stats_conns.clear()
+
+
+def _stats_should_abort(stop_event) -> bool:
+    """取消判定：用户 stop_event 置位 或 主线程已触发中止。"""
+    if stop_event is not None and stop_event.is_set():
+        return True
+    return _stats_aborted
+
+
 def _rcached(role: str, db: str, read_timeout: int = 120):
-    """取线程复用读连接；断线自动重连。调用方不关闭。"""
+    """取线程复用读连接；断线自动重连。调用方不关闭。
+
+    统计运行期间会把连接登记到 _stats_conns，供 cancel_stats_queries 打断。
+    """
     cache = getattr(_tls, "conns", None)
     if cache is None:
         cache = {}
@@ -48,12 +96,16 @@ def _rcached(role: str, db: str, read_timeout: int = 120):
     if conn is not None:
         try:
             conn.ping(reconnect=True)
+            if _stats_running:
+                _stats_conns.add(conn)
             return conn
         except Exception:
             try: conn.close()
             except Exception: pass
     conn = _open_conn(role, db, read_timeout)
     cache[key] = conn
+    if _stats_running:
+        _stats_conns.add(conn)
     return conn
 
 
