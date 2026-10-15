@@ -372,9 +372,22 @@ def _search_danmaku_one_db(db: str, role: str, groups: list[list[str]], start: s
                     "ORDER BY ctime DESC LIMIT %s"
                 )
                 pat = "%" + _like_esc(kw_list[0]) + "%"
-                cur.execute(sql, [term, *params, *excl_params, sub_lim,
-                                  pat, pat, *params, *excl_params, sub_lim,
-                                  limit + 1])
+                try:
+                    cur.execute(sql, [term, *params, *excl_params, sub_lim,
+                                      pat, pat, *params, *excl_params, sub_lim,
+                                      limit + 1])
+                except Exception:
+                    # 无全文索引（已按空间考量 DROP）时回退 LIKE，
+                    # 与评论单关键词路径保持一致，不让检索崩掉。
+                    cols_d = cols.replace("t.", "d.")
+                    sql2 = (
+                        f"SELECT {cols_d} FROM `{db}`.raw_danmaku d "
+                        f"LEFT JOIN `{db}`.meta_video v ON v.aid = d.video_aid "
+                        f"LEFT JOIN `{db}`.dim_user u ON u.uid = d.uid "
+                        f"WHERE d.content LIKE %s{cond}{excl} "
+                        "ORDER BY d.ctime DESC LIMIT %s"
+                    )
+                    cur.execute(sql2, [pat, *params, *excl_params, limit + 1])
             elif len(kw_list) >= 2:
                 # 多关键词：内容 ALL LIKE + mid_hash/uid 兜底
                 like_where, like_params = _multi_like_cond("d", kw_list)
