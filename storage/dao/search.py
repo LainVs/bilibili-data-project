@@ -1,9 +1,10 @@
 """搜索子系统：评论文本/弹幕/视频的跨仓检索（LIKE + 全文索引）。"""
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 
-from storage.dao._core import _shard_dbs, _uid_same_dsn, logger
+from storage.dao._core import _open_conn, _shard_dbs, _uid_same_dsn, logger
 
 
 def _like_esc(keyword: str) -> str:
@@ -14,6 +15,187 @@ def _like_esc(keyword: str) -> str:
         .replace("%", "\\%")
         .replace("_", "\\_")
     )
+
+
+# ---------------------------------------------------------------------------
+# 检索计划选择（密度自适应）
+#
+# 背景：归档分仓从第一天起就没有 idx_ctime（建仓用的 _COMMENT_DDL 里没写），
+# 于是 `WHERE content LIKE '%词%' ORDER BY ctime DESC LIMIT n` 只能全表扫 +
+# filesort，19 个仓串行累加成分钟级（实测 192s）。补上 idx_ctime 后 MySQL 可以
+# 反扫索引 + 凑够 n 条即停，但代价是**稀疏词退化成整索引遍历**。1144 万行分仓
+# 实测（LIMIT 303）：
+#     稠密词"的"      15.0s → 0.0s
+#     中等词"哈哈"    14.3s → 0.1s
+#     零命中词        12.8s → 49.9s   ← 慢 3.9 倍
+# 更麻烦的是优化器对 LIKE '%x%' 的选择率一律按 11% 估，**零命中词也会自发选
+# 索引计划**，所以不能指望它，必须显式给提示词。
+#
+# 方案：先用 idx_ctime 反扫采样 _PROBE_ROWS 行数命中数（实测 0.06s）。这段采样
+# 区间正是索引计划最先走的那一段，衡量的就是"凑够 limit 条要扫多少行"，比任何
+# 统计估算都准。稠密 → FORCE INDEX（早停，秒级）；稀疏 → IGNORE INDEX（维持
+# 全表扫，不退化）。两头都不亏。
+_CTIME_IDX = "idx_ctime"
+_PROBE_ROWS = 20000         # 采样行数：实测 0.06s
+_INDEX_WALK_BUDGET = 0.25   # 索引反扫最多走全表 25%（实测交叉点约 26%）
+
+_IDX_CACHE: dict = {}       # (role, db) -> 是否有 idx_ctime
+_ROWS_CACHE: dict = {}      # (role, db) -> (采样时刻, 估算行数)
+_MAXCTIME_CACHE: dict = {}  # db -> (采样时刻, (是否可信, 最新 ctime))
+_CACHE_TTL = 300.0
+
+
+def _quick_query(db: str, sql: str, args: tuple = (), timeout: int = 30, role: str = "read"):
+    """一次性短连接查询（用完即关）。返回首行或 None。
+
+    这里刻意不用 _rcached：检索跑在每次搜索新建的 worker 线程里，线程本地
+    连接池会随线程数累积（19 个仓 × 每个搜索线程），短连接更省连接数。
+    """
+    conn = _open_conn(role, db, timeout)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            return cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _has_ctime_index(cur, db: str, role: str) -> bool:
+    """该仓 raw_comments 是否已有 idx_ctime（进程内缓存）。
+
+    缓存键必须带 role：`bilibili_data` 这个名字在 D(写缓冲) 与 E(主库) 上
+    都存在，是两个不同的物理库，索引情况可能不一样。
+    """
+    key = (role, db)
+    hit = _IDX_CACHE.get(key)
+    if hit is not None:
+        return hit
+    ok = False
+    try:
+        cur.execute(
+            "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=%s "
+            "AND TABLE_NAME='raw_comments' AND INDEX_NAME=%s LIMIT 1", (db, _CTIME_IDX))
+        ok = cur.fetchone() is not None
+    except Exception:
+        ok = False
+    _IDX_CACHE[key] = ok
+    return ok
+
+
+def _table_rows(db: str, role: str) -> int:
+    """该仓 raw_comments 估算行数（information_schema，缓存 5 分钟）。"""
+    key = (role, db)
+    now = time.monotonic()
+    hit = _ROWS_CACHE.get(key)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
+    n = 0
+    try:
+        row = _quick_query(db, "SELECT TABLE_ROWS AS n FROM information_schema.TABLES "
+                               "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='raw_comments'", (db,), 60, role)
+        n = int((row.get("n") if isinstance(row, dict) else row[0]) or 0)
+    except Exception:
+        n = 0
+    _ROWS_CACHE[key] = (now, n)
+    return n
+
+
+def _probe_hits(cur, db: str, groups: list[list[str]], cond: str, params: list,
+                excl: str, excl_params: list, min_like: int) -> int:
+    """用 idx_ctime 反扫采样 _PROBE_ROWS 行，数出 content 命中的行数。"""
+    smart_x, smart_p = _like_cond_smart("x", groups)
+    like_x, like_p = "", []
+    if min_like and min_like > 0:
+        like_x = " AND x.like_num >= %s"
+        like_p = [int(min_like)]
+    sql = (f"SELECT COUNT(*) AS n FROM ("
+           f"SELECT c.content, c.like_num FROM `{db}`.raw_comments c "
+           f"FORCE INDEX({_CTIME_IDX}) WHERE 1=1{cond}{excl} "
+           f"ORDER BY c.ctime DESC LIMIT %s) x WHERE 1=1{smart_x}{like_x}")
+    cur.execute(sql, [*params, *excl_params, _PROBE_ROWS, *smart_p, *like_p])
+    row = cur.fetchone()
+    return int((row.get("n") if isinstance(row, dict) else row[0]) or 0)
+
+
+def _plan_hint(cur, db: str, role: str, groups: list[list[str]], cond: str, params: list,
+               excl: str, excl_params: list, limit: int, min_like: int) -> str:
+    """密度自适应选计划：返回可插入 FROM 子句的索引提示（可能为空串）。"""
+    if not limit or limit <= 0:
+        return ""
+    if not _has_ctime_index(cur, db, role):
+        return ""
+    total = _table_rows(db, role)
+    if total <= 0:
+        return ""
+    try:
+        hits = _probe_hits(cur, db, groups, cond, params, excl, excl_params, min_like)
+    except Exception as exc:
+        logger.debug("密度采样失败(%s)，按全表扫: %s", db, exc)
+        return ""
+    if hits <= 0:
+        # 采样区间一条不中：索引反扫会一路走到表尾（实测慢 3.9 倍），全表扫更划算
+        return f" IGNORE INDEX({_CTIME_IDX})"
+    density = hits / float(min(_PROBE_ROWS, total))
+    if limit / density <= total * _INDEX_WALK_BUDGET:
+        return f" FORCE INDEX({_CTIME_IDX})"
+    return f" IGNORE INDEX({_CTIME_IDX})"
+
+
+def _shard_max_ctime(db: str) -> tuple[bool, str | None]:
+    """该仓最新评论时间（idx_ctime 反扫 1 条，O(1)）。返回 (是否可信, 值)。
+
+    没有索引时直接判不可信 —— 不退化成全表扫 MAX(ctime)（那是十几秒）。
+    """
+    now = time.monotonic()
+    hit = _MAXCTIME_CACHE.get(db)
+    if hit and now - hit[0] < _CACHE_TTL:
+        return hit[1]
+    out: tuple = (False, None)
+    try:
+        row = _quick_query(db, f"SELECT ctime FROM raw_comments FORCE INDEX({_CTIME_IDX}) "
+                               f"ORDER BY ctime DESC LIMIT 1")
+        v = (row.get("ctime") if isinstance(row, dict) else row[0]) if row else None
+        out = (True, str(v) if v is not None else None)
+    except Exception:
+        # 没索引（报错 1176）或仓不可达：判不可信，不退化成全表扫 MAX(ctime)
+        out = (False, None)
+    _MAXCTIME_CACHE[db] = (now, out)
+    return out
+
+
+def _order_shards_fresh_first(dbs: list) -> list:
+    """分仓按「最新评论时间」倒序；时间未知的排最后（保持原相对顺序）。"""
+    known: list = []
+    unknown: list = []
+    for i, db in enumerate(dbs):
+        ok, mx = _shard_max_ctime(db)
+        if ok and mx:
+            known.append((mx, i, db))
+        else:
+            unknown.append((i, db))
+    known.sort(key=lambda t: t[0], reverse=True)
+    return [db for _, _, db in known] + [db for _, db in unknown]
+
+
+def _can_stop_early(rows: list, limit: int, remaining: list, is_unlimited: bool) -> bool:
+    """已凑满 limit 条、且剩余所有仓的最新评论都早于当前第 limit 名 → 可停。
+
+    正确性：剩余仓里不可能有任何一条挤进全局前 limit 名。任一仓时间未知
+    就保守返回 False（宁可多扫，不可漏结果）。
+    """
+    if is_unlimited or not remaining or limit <= 0 or len(rows) < limit:
+        return False
+    thr = sorted((str(r.get("ctime") or "") for r in rows), reverse=True)[limit - 1]
+    for db in remaining:
+        ok, mx = _shard_max_ctime(db)
+        if not ok:
+            return False
+        if mx is not None and mx >= thr:
+            return False
+    return True
 
 
 def _parse_keywords(raw: str) -> list[str]:
@@ -164,7 +346,10 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
     from config import get_config
     cfg = get_config()
     base = getattr(cfg, "mysql_archive" if role=="read" else "mysql_write", cfg.mysql)
-    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"], password=base["password"], database=db, charset=base["charset"], cursorclass=pymysql.cursors.DictCursor, connect_timeout=5, read_timeout=120)
+    conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"], password=base["password"], database=db, charset=base["charset"], cursorclass=pymysql.cursors.DictCursor, connect_timeout=5,
+                           # 稀疏词走全表扫时，千万行仓在 HDD 上可能要几分钟；
+                           # 120s 会把大仓静默判超时跳过（结果不全），对齐 db.py 的 E 读超时
+                           read_timeout=600)
     try:
         with conn.cursor() as cur:
             cond, params = _dt_cond("c.ctime", start, end)
@@ -175,12 +360,15 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
                 like_cond = " AND c.like_num >= %s"
                 like_params = [int(min_like)]
             cols = ("t.rpid, t.uid, u.uname, t.content, t.like_num, t.ctime, t.ip_location, t.video_aid, v.bvid, v.title, v.owner_uid, v.owner_name")
+            # 密度自适应：给下面的 LIKE 路径挑「反扫索引」还是「全表扫」
+            # （FULLTEXT 路径不给提示词，否则 MATCH 找不到全文索引）
+            hint = _plan_hint(cur, db, role, groups, cond, params, excl, excl_params, limit, min_like)
             if len(groups) > 1:
                 # OR 查询走 LIKE（布尔全文索引表达不了 OR-of-AND，直接 LIKE 最准）
                 smart_where, smart_params = _like_cond_smart("c", groups)
                 cols_c = cols.replace("t.", "c.")
                 where = "1=1" + smart_where + cond + excl + like_cond
-                sql = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
+                sql = f"SELECT {cols_c} FROM {db}.raw_comments c{hint} LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
                 cur.execute(sql, [*smart_params, *params, *excl_params, *like_params, limit])
             elif len(kw_list) == 1 and _ft_usable(kw_list[0]):
                 # 单关键词 FULLTEXT 路径（原有逻辑）
@@ -195,7 +383,7 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
                     pat = "%" + _like_esc(kw_list[0]) + "%"
                     where = "c.content LIKE %s" + cond + excl + like_cond
                     cols_c = cols.replace("t.", "c.")
-                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
+                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c{hint} LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
                     cur.execute(sql2, [pat, *params, *excl_params, *like_params, limit])
             elif len(kw_list) >= 2 and _multi_ft_usable(kw_list):
                 # 多关键词 FULLTEXT AND 路径
@@ -210,14 +398,14 @@ def _search_one_db(db: str, role: str, keyword: str, start: str, end: str, exclu
                     fb_where, fb_params = _multi_like_cond("c", kw_list)
                     cols_c = cols.replace("t.", "c.")
                     where = "1=1" + fb_where + cond + excl + like_cond
-                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
+                    sql2 = f"SELECT {cols_c} FROM {db}.raw_comments c{hint} LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
                     cur.execute(sql2, [*fb_params, *params, *excl_params, *like_params, limit])
             else:
                 # LIKE 路径（单关键词单字 / 多关键词回退）
                 fb_where, fb_params = _multi_like_cond("c", kw_list)
                 cols_c = cols.replace("t.", "c.")
                 where = "1=1" + fb_where + cond + excl + like_cond
-                sql = f"SELECT {cols_c} FROM {db}.raw_comments c LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
+                sql = f"SELECT {cols_c} FROM {db}.raw_comments c{hint} LEFT JOIN {db}.meta_video v ON v.aid=c.video_aid LEFT JOIN {db}.dim_user u ON u.uid=c.uid WHERE {where} ORDER BY c.ctime DESC LIMIT %s"
                 cur.execute(sql, [*fb_params, *params, *excl_params, *like_params, limit])
             return list(cur.fetchall())
     finally:
@@ -243,6 +431,13 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
     is_unlimited = not limit or limit <= 0
     qlimit = 500000 if is_unlimited else limit
     dbs = _shard_dbs()
+    # 分仓按「最新评论时间」倒序：新数据先出首屏（结果本来就是按时间倒序），
+    # 且排序后一旦凑满就能整段跳过更旧的仓。无索引的仓时间未知，排最后。
+    if len(dbs) > 1:
+        try:
+            dbs = _order_shards_fresh_first(dbs)
+        except Exception as exc:
+            logger.debug("分仓排序失败，按原顺序: %s", exc)
     all_rows = []
     seen: set = set()  # rpid 去重（重采视频会导致 D/E/小仓出现同一条）
     failed: list = []
@@ -263,11 +458,20 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
     except Exception as exc:
         failed.append(f"D缓冲:{exc}")
         logger.warning("搜评论 D缓冲 跳过: %s", exc)
-    for db in dbs:
+    same_dsn = _uid_same_dsn()
+    e_targets = [d for d in dbs if not (same_dsn and d == "bilibili_data")]
+    # D 缓冲装的是最新数据：它一个库就凑满 limit 且所有 E 仓都更旧时，
+    # 全局前 limit 名全在 D 里，连一个分仓都不用查。
+    stopped = _can_stop_early(all_rows, limit, e_targets, is_unlimited)
+    if stopped:
+        logger.info("搜评论提前结束：D 缓冲已凑满 %d 条，全部 E 仓更旧", len(all_rows))
+    for pos, db in enumerate(dbs):
+        if stopped:
+            break
         if stop_event is not None and stop_event.is_set():
             logger.info("搜评论被用户取消，已停于 %s 仓之前", db)
             break
-        if _uid_same_dsn() and db == "bilibili_data":
+        if same_dsn and db == "bilibili_data":
             continue  # 单库模式：D 与 E 主库同一物理库，避免重复
         try:
             rows = _search_one_db(db, "read", keyword, start, end, exclude, qlimit, groups=groups, min_like=min_like)
@@ -278,9 +482,18 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
         except Exception as exc:
             failed.append(f"{db}:{exc}")
             logger.warning("搜评论 %s 跳过: %s", db, exc)
+        # 提前结束：已凑满 limit 条，且剩余仓的最新评论都更旧 → 不可能再进榜
+        remaining = [d for d in dbs[pos + 1:] if not (same_dsn and d == "bilibili_data")]
+        if _can_stop_early(all_rows, limit, remaining, is_unlimited):
+            logger.info("搜评论提前结束：已得 %d 条，剩余 %d 个仓都更旧", len(all_rows), len(remaining))
+            stopped = True
+            break
     all_rows.sort(key=lambda r: r.get("ctime") or "", reverse=True)
     out = {"rows": all_rows, "total": len(all_rows)} if is_unlimited else \
         {"rows": all_rows[:limit], "total": None if len(all_rows) > limit else len(all_rows)}
+    if stopped:
+        # 主动截断：后面还有多少条未知，必须报「≥」而不是具体数
+        out["total"] = None
     if failed:
         out["failed"] = failed
     if stop_event is not None and stop_event.is_set():
@@ -309,7 +522,7 @@ def _search_danmaku_one_db(db: str, role: str, groups: list[list[str]], start: s
     conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
                            password=base["password"], database=db, charset=base["charset"],
                            cursorclass=pymysql.cursors.DictCursor,
-                           connect_timeout=5, read_timeout=120)
+                           connect_timeout=5, read_timeout=600)
     try:
         with conn.cursor() as cur:
             kw_list = flatten_smart_query(groups)
@@ -649,7 +862,7 @@ def _search_videos_one_db(db: str, role: str, groups: list[list[str]], start: st
     conn = pymysql.connect(host=base["host"], port=base["port"], user=base["user"],
                            password=base["password"], database=db, charset=base["charset"],
                            cursorclass=pymysql.cursors.DictCursor,
-                           connect_timeout=5, read_timeout=120)
+                           connect_timeout=5, read_timeout=600)
     try:
         with conn.cursor() as cur:
             where_content, all_params = _video_match_cond(groups)

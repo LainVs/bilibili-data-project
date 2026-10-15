@@ -303,11 +303,14 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
         with e.cursor() as cur:
             cur.execute(f"CREATE DATABASE IF NOT EXISTS `{shard}` DEFAULT CHARACTER SET utf8mb4")
         e.commit()
-        from storage.db import _ALL_DDL
+        from storage.db import _ALL_DDL, _COMMENT_CTIME_KEY
         # 在shard库建表
         for ddl in _ALL_DDL:
             # 在shard库执行
             shard_ddl = ddl.replace("CREATE TABLE IF NOT EXISTS ", f"CREATE TABLE IF NOT EXISTS `{shard}`.")
+            # 分仓不带 idx_ctime：改为装载完成后单独建（见下面 2.55），
+            # InnoDB 排序批量构建远快于边 LOAD DATA 边维护索引。
+            shard_ddl = shard_ddl.replace(_COMMENT_CTIME_KEY, "")
             with e.cursor() as cur:
                 cur.execute(shard_ddl)
         e.commit()
@@ -582,6 +585,32 @@ def shard_archive(progress_cb=None, stop_flag: threading.Event | None = None) ->
             _report(f"全局去重并集 {shard} 完成（dim行约{r.get('uids_add', 0)}）")
         except Exception as e:
             _report(f"全局去重并集跳过（可用回填补）: {e}")
+        # 2.55 建检索索引 idx_ctime：分仓建表用的 _COMMENT_DDL 里没有这个索引，
+        # 于是 `WHERE content LIKE '%词%' ORDER BY ctime DESC LIMIT n` 只能全表扫 +
+        # filesort（跨 19 仓串行累加成分钟级，实测 192s）。数据装载完成后再建，
+        # 走 InnoDB 排序批量构建，比边插边维护索引快得多。失败不挡归档。
+        try:
+            _ei = _get_conn("read")
+            try:
+                with _ei.cursor() as _icur:
+                    _icur.execute(
+                        "SELECT COUNT(*) AS n FROM information_schema.STATISTICS "
+                        "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='raw_comments' "
+                        "AND INDEX_NAME='idx_ctime'", (shard,))
+                    _r0 = _icur.fetchone()
+                    _has = int((_r0.get("n") if isinstance(_r0, dict) else _r0[0]) or 0)
+                    if _has:
+                        _report(f"索引 {shard}.raw_comments idx_ctime 已存在，跳过")
+                    else:
+                        _report(f"建检索索引 {shard}.raw_comments idx_ctime ...")
+                        _icur.execute(f"ALTER TABLE `{shard}`.raw_comments ADD INDEX idx_ctime (ctime)")
+                        _report(f"索引 {shard}.raw_comments idx_ctime 就绪")
+                _ei.commit()
+            finally:
+                try: _ei.close()
+                except Exception: pass
+        except Exception as e:
+            _report(f"建检索索引跳过（不影响归档，可用 tools/add_ctime_index.py 后台补）: {e}")
         # 2.6 ANALYZE 新仓表：LOAD DATA 后 table_rows 失准会导致统计走
         # 300秒级 COUNT(*) 回退；ANALYZE 只要几十秒。失败不挡归档。
         try:

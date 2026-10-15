@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 
 import pymysql
+import pytest
 
 from storage import dao
 from tests.conftest import FailingConn, FakeConn
@@ -318,3 +319,206 @@ def test_stats_cancel_noop_when_idle():
     assert _core._stats_aborted is False
     assert _core._stats_should_abort(None) is False
 
+
+
+# ---------- 检索计划：密度自适应（idx_ctime 反扫 vs 全表扫）----------
+
+@pytest.fixture(autouse=True)
+def _clear_search_caches():
+    """检索计划的三个进程内缓存（索引/行数/最新时间）跨用例会互相污染，逐个清干净。"""
+    from storage.dao import search as _search
+
+    caches = (_search._IDX_CACHE, _search._ROWS_CACHE, _search._MAXCTIME_CACHE)
+    for c in caches:
+        c.clear()
+    yield
+    for c in caches:
+        c.clear()
+
+
+class _PlanCursor:
+    """假游标：按 SQL 特征返回「有没有索引」「探测命中几行」。"""
+
+    def __init__(self, has_index: bool = True, probe_hits: int = 0) -> None:
+        self.has_index = has_index
+        self.probe_hits = probe_hits
+        self.sqls: list[str] = []
+
+    def execute(self, sql, args=None):
+        self.sqls.append(sql)
+        return 1
+
+    def fetchone(self):
+        sql = self.sqls[-1]
+        if "information_schema.STATISTICS" in sql:
+            return (1,) if self.has_index else None
+        if "COUNT(*)" in sql:
+            return {"n": self.probe_hits}
+        return None
+
+
+def _plan(cur, limit, total=11_441_092):
+    """跑一次 _plan_hint，total 行数直接桩掉（避免真连库）。"""
+    from storage.dao import search as _search
+
+    orig = _search._table_rows
+    _search._table_rows = lambda db, role: total
+    try:
+        return _search._plan_hint(cur, "bilibili_x", "read", [["kw"]], "", [], "", [], limit, 0)
+    finally:
+        _search._table_rows = orig
+
+
+def test_plan_hint_no_index_returns_empty():
+    """仓里没有 idx_ctime 时不给提示词（MySQL 也不能用不存在的索引）。"""
+    assert _plan(_PlanCursor(has_index=False, probe_hits=500), 100) == ""
+
+
+def test_plan_hint_zero_hits_prefers_full_scan():
+    """采样零命中 → 索引反扫会走到表尾（实测慢 3.9 倍），必须压成全表扫。"""
+    assert _plan(_PlanCursor(probe_hits=0), 100) == " IGNORE INDEX(idx_ctime)"
+
+
+def test_plan_hint_dense_prefers_index():
+    """稠密词（2000/20000=10%）：凑 100 条只需走 1000 行，走索引早停。"""
+    assert _plan(_PlanCursor(probe_hits=2000), 100) == " FORCE INDEX(idx_ctime)"
+
+
+def test_plan_hint_sparse_with_huge_limit_prefers_full_scan():
+    """稀疏词 + 巨大 limit：预期要走全表 25% 以上，全表扫更划算。"""
+    assert _plan(_PlanCursor(probe_hits=100), 100_000) == " IGNORE INDEX(idx_ctime)"
+
+
+def test_plan_hint_unlimited_returns_empty():
+    """无限条数（导出全量）必须扫全部行，不给提示词。"""
+    assert _plan(_PlanCursor(probe_hits=2000), 0) == ""
+
+
+def test_probe_hits_builds_forced_index_probe():
+    """探测 SQL 必须 FORCE INDEX 反扫 idx_ctime，且把关键词参数放在正确位置。"""
+    from storage.dao import search as _search
+
+    cur = _PlanCursor(probe_hits=7)
+    n = _search._probe_hits(cur, "bilibili_x", [["残影"]], " AND c.ctime <= %s",
+                            ["2026-10-01"], "", [], 0)
+    assert n == 7
+    sql = cur.sqls[-1]
+    assert f"FORCE INDEX({_search._CTIME_IDX})" in sql
+    assert "ORDER BY c.ctime DESC LIMIT %s" in sql
+    assert "x.content LIKE %s" in sql
+
+
+# ---------- 分仓排序 + 提前终止 ----------
+
+def test_order_shards_fresh_first_sorts_newest_first(monkeypatch):
+    """分仓按最新评论时间倒序；时间未知的排最后且保持原相对顺序。"""
+    from storage.dao import search as _search
+
+    table = {
+        "bilibili_old": (True, "2026-09-01 00:00:00"),
+        "bilibili_new": (True, "2026-10-09 00:00:00"),
+        "bilibili_mid": (True, "2026-09-20 00:00:00"),
+        "bilibili_unknown": (False, None),
+    }
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: table[db])
+    got = _search._order_shards_fresh_first(list(table))
+    assert got == ["bilibili_new", "bilibili_mid", "bilibili_old", "bilibili_unknown"]
+
+
+def _rows(n, ctime="2026-10-01 00:00:00"):
+    return [{"rpid": i, "ctime": ctime} for i in range(n)]
+
+
+def test_can_stop_early_true_when_remaining_all_older(monkeypatch):
+    from storage.dao import search as _search
+
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: (True, "2026-09-01 00:00:00"))
+    assert _search._can_stop_early(_rows(10), 10, ["bilibili_old"], False) is True
+
+
+def test_can_stop_early_false_when_remaining_newer(monkeypatch):
+    from storage.dao import search as _search
+
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: (True, "2026-12-01 00:00:00"))
+    assert _search._can_stop_early(_rows(10), 10, ["bilibili_x"], False) is False
+
+
+def test_can_stop_early_false_when_unknown(monkeypatch):
+    """时间未知时保守不提前停（宁可多扫，不可漏结果）。"""
+    from storage.dao import search as _search
+
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: (False, None))
+    assert _search._can_stop_early(_rows(10), 10, ["bilibili_x"], False) is False
+
+
+def test_can_stop_early_false_when_not_enough_rows_or_unlimited():
+    from storage.dao import search as _search
+
+    assert _search._can_stop_early(_rows(3), 10, ["bilibili_x"], False) is False
+    assert _search._can_stop_early(_rows(10), 10, ["bilibili_x"], True) is False
+    assert _search._can_stop_early(_rows(10), 10, [], False) is False
+
+
+def test_search_comments_stops_early_on_dense_keyword(monkeypatch):
+    """稠密词：D 缓冲 + 最新一仓就凑满 limit，且剩余仓更旧 → 不再扫后面的仓。"""
+    from storage.dao import search as _search
+
+    hit: list[str] = []
+
+    def _fake_one(db, role, kw, start, end, exclude, limit, **kw2):
+        hit.append(db)
+        return [{"rpid": f"{db}-{i}", "ctime": "2026-10-09 00:00:00"} for i in range(limit)]
+
+    maxes = {"bilibili_new": (True, "2026-10-09 00:00:00"),
+             "bilibili_old": (True, "2026-09-01 00:00:00")}
+
+    monkeypatch.setattr(_search, "_shard_dbs", lambda: ["bilibili_new", "bilibili_old"])
+    monkeypatch.setattr(_search, "_uid_same_dsn", lambda: False)
+    monkeypatch.setattr(_search, "_search_one_db", _fake_one)
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: maxes[db])
+
+    out = _search.search_comments("的", limit=10)
+    assert hit == ["bilibili_data", "bilibili_new"], f"应提前结束，实际 {hit}"
+    assert len(out["rows"]) == 10
+    assert out["total"] is None  # 已截断：语义与「还有更多」一致
+
+
+def test_search_comments_scans_all_when_keyword_is_sparse(monkeypatch):
+    """稀疏词：凑不满 limit 时一个仓都不能少。"""
+    from storage.dao import search as _search
+
+    hit: list[str] = []
+
+    def _fake_one(db, role, kw, start, end, exclude, limit, **kw2):
+        hit.append(db)
+        return []
+
+    monkeypatch.setattr(_search, "_shard_dbs", lambda: ["bilibili_new", "bilibili_old"])
+    monkeypatch.setattr(_search, "_uid_same_dsn", lambda: False)
+    monkeypatch.setattr(_search, "_search_one_db", _fake_one)
+    monkeypatch.setattr(_search, "_shard_max_ctime", lambda db: (True, "2026-10-09 00:00:00"))
+
+    _search.search_comments("量子引力泡沫", limit=10)
+    assert "bilibili_old" in hit
+
+
+def test_has_ctime_index_cache_is_role_keyed():
+    """`bilibili_data` 在 D(写缓冲) 与 E(主库) 是两个物理库，缓存必须按 role 分开。"""
+
+    class _C:
+        def __init__(self, ok):
+            self.ok = ok
+            self.sqls = []
+
+        def execute(self, sql, args=None):
+            self.sqls.append(sql)
+
+        def fetchone(self):
+            return (1,) if self.ok else None
+
+    from storage.dao import search as _search
+
+    assert _search._has_ctime_index(_C(True), "bilibili_data", "write") is True
+    assert _search._has_ctime_index(_C(False), "bilibili_data", "read") is False
+    # 写库角色的缓存不能被读库角色覆盖
+    assert _search._has_ctime_index(_C(False), "bilibili_data", "write") is True

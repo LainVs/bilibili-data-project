@@ -281,7 +281,13 @@ CREATE TABLE IF NOT EXISTS raw_danmaku (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='弹幕原始数据'
 """
 
-_COMMENT_DDL = """
+# 评论检索关键索引：`WHERE content LIKE '%词%' ORDER BY ctime DESC LIMIT n` 靠它
+# 反扫 + 凑够即停；没有它就只能全表扫 + filesort（跨 19 仓串行累加成分钟级）。
+# 归档分仓建表时**剔除**此行、改为装载完成后单独建（InnoDB 排序批量构建远快于
+# 边 LOAD 边维护索引），见 storage/archive_sync.py 的「2.55 建检索索引」。
+_COMMENT_CTIME_KEY = "    KEY idx_ctime (ctime),\n"
+
+_COMMENT_DDL = f"""
 CREATE TABLE IF NOT EXISTS raw_comments (
     rpid       BIGINT       NOT NULL COMMENT '评论ID',
     video_aid  BIGINT       NOT NULL COMMENT '所属对象ID(视频aid/动态id/专栏cvid)',
@@ -293,7 +299,7 @@ CREATE TABLE IF NOT EXISTS raw_comments (
     ctime      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '评论时间',
     ip_location VARCHAR(64) NOT NULL DEFAULT '' COMMENT 'IP属地',
     PRIMARY KEY (rpid),
-    KEY idx_aid (video_aid, ref_type),
+{_COMMENT_CTIME_KEY}    KEY idx_aid (video_aid, ref_type),
     KEY idx_uid (uid),
     KEY idx_uid_ctime (uid, ctime),
     KEY idx_parent (parent)
