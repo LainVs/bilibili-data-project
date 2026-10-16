@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 
 from storage.dao._core import _open_conn, _shard_dbs, _uid_same_dsn, logger
@@ -43,6 +44,52 @@ _IDX_CACHE: dict = {}       # (role, db) -> 是否有 idx_ctime
 _ROWS_CACHE: dict = {}      # (role, db) -> (采样时刻, 估算行数)
 _MAXCTIME_CACHE: dict = {}  # db -> (采样时刻, (是否可信, 最新 ctime))
 _CACHE_TTL = 300.0
+
+# ---------------------------------------------------------------------------
+# 检索结果进程内缓存
+#
+# 稀疏/零命中词是重灾区：无索引可早停，必须把 19 个仓全表扫一遍（机械硬盘上
+# 十几分钟），而"同一个词再搜一次"是完全重复的昂贵劳动。这里用一个小容量
+# LRU + 短 TTL 缓存**完整且无失败仓**的结果：
+#   - 只缓存"完整结果"：早停（total=None，截断）或有失败仓时不缓存，
+#     否则会把不完整结果固化。
+#   - TTL 短（120s）：D 缓冲还在持续写入，过期即失效，避免陈旧。
+#   - 容量小（64）：避免长期占内存。
+_SEARCH_CACHE_TTL = 120.0
+_SEARCH_CACHE_MAX = 64
+_SEARCH_CACHE: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
+
+
+def _search_cache_key(kind: str, keyword: str, start: str, end: str,
+                      exclude: str, limit: int, min_like: int) -> tuple:
+    return (kind, (keyword or "").strip(), start or "", end or "",
+            exclude or "", int(limit or 0), int(min_like or 0))
+
+
+def _search_cache_get(key: tuple):
+    hit = _SEARCH_CACHE.get(key)
+    if not hit:
+        return None
+    ts, payload = hit
+    if time.monotonic() - ts > _SEARCH_CACHE_TTL:
+        _SEARCH_CACHE.pop(key, None)
+        return None
+    _SEARCH_CACHE.move_to_end(key)
+    return payload
+
+
+def _search_cache_put(key: tuple, payload: dict) -> None:
+    _SEARCH_CACHE[key] = (time.monotonic(), payload)
+    _SEARCH_CACHE.move_to_end(key)
+    while len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+        _SEARCH_CACHE.popitem(last=False)
+
+
+def clear_search_cache() -> int:
+    """清空检索缓存（供测试与"强制刷新"用）。返回清掉的条目数。"""
+    n = len(_SEARCH_CACHE)
+    _SEARCH_CACHE.clear()
+    return n
 
 
 def _quick_query(db: str, sql: str, args: tuple = (), timeout: int = 30, role: str = "read"):
@@ -430,6 +477,14 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
         return {"rows": [], "total": 0}
     is_unlimited = not limit or limit <= 0
     qlimit = 500000 if is_unlimited else limit
+    # 进程内缓存：同一关键词的重复检索直接命中（稀疏词全表扫极贵，值得缓存）
+    ckey = _search_cache_key("cmt", keyword, start, end, exclude, qlimit, min_like)
+    cached = _search_cache_get(ckey)
+    if cached is not None and not (stop_event is not None and stop_event.is_set()):
+        if progress_cb:
+            try: progress_cb("缓存", cached.get("rows") or [])
+            except Exception: pass
+        return dict(cached)
     dbs = _shard_dbs()
     # 分仓按「最新评论时间」倒序：新数据先出首屏（结果本来就是按时间倒序），
     # 且排序后一旦凑满就能整段跳过更旧的仓。无索引的仓时间未知，排最后。
@@ -498,6 +553,9 @@ def search_comments(keyword: str, *, start: str = "", end: str = "", exclude: st
         out["failed"] = failed
     if stop_event is not None and stop_event.is_set():
         out["cancelled"] = True
+    # 仅缓存完整、无失败、非取消的评论检索结果
+    if not stopped and not failed and not out.get("cancelled"):
+        _search_cache_put(ckey, out)
     return out
 
 
@@ -670,6 +728,10 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
     qlimit = 500000 if is_unlimited else limit
     # 每库多取 1 条做截断探测（与旧单库语义一致）
     per_db = qlimit + 1
+    ckey = _search_cache_key("dmk", keyword, start, end, exclude, qlimit, 0)
+    cached = _search_cache_get(ckey)
+    if cached is not None and not (stop_event is not None and stop_event.is_set()):
+        return dict(cached)
     all_rows: list[dict] = []
     seen: set = set()
     failed: list = []
@@ -703,6 +765,8 @@ def search_danmaku(keyword: str, *, start: str = "", end: str = "",
         out["failed"] = failed
     if stop_event is not None and stop_event.is_set():
         out["cancelled"] = True
+    if not failed and not out.get("cancelled"):
+        _search_cache_put(_search_cache_key("dmk", keyword, start, end, exclude, qlimit, 0), out)
     return out
 
 

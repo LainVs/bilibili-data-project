@@ -110,12 +110,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_iptrace.add_argument("--bvid", default="", help="分析指定视频 BV（批量排查观众跨域跳跃）")
     p_iptrace.add_argument("--limit", type=int, default=5000, help="分析发言上限条数（默认5000）")
     p_iptrace.add_argument("--top", type=int, default=30, help="输出异常人数上限（默认30）")
+
+    p_search = sub.add_parser("search", help="跨仓检索（评论/弹幕/视频，支持 AND/OR/引号短语）")
+    p_search.add_argument("keyword", help="关键词（空格/逗号=同时包含，OR/|=任一，\"引号\"=精确短语）")
+    p_search.add_argument("--type", choices=["comments", "danmaku", "videos", "all"],
+                          default="comments", help="检索类型（默认 comments）")
+    p_search.add_argument("--start", default="", help="起始时间 YYYY-MM-DD")
+    p_search.add_argument("--end", default="", help="结束时间 YYYY-MM-DD")
+    p_search.add_argument("--exclude", default="", help="排除词（逗号分隔，防子串误伤）")
+    p_search.add_argument("--min-like", dest="min_like", type=int, default=0, help="最低点赞数")
+    p_search.add_argument("--limit", type=int, default=100, help="结果上限（默认100，0=不限）")
+    p_search.add_argument("--top", type=int, default=20, help="终端打印条数（默认20）")
+    p_search.add_argument("--export", default="", help="顺带导出到 .xlsx/.csv")
     return parser.parse_args(argv)
 
 
 def _dispatch(command: str):
     """命令名 -> run(args)->int 处理器；未知命令返回 None。"""
-    from commands import analyze, basic, crawl, export, stats, tools
+    from commands import analyze, basic, crawl, export, search, stats, tools
 
     return {
         "init": basic.run_init,
@@ -131,6 +143,7 @@ def _dispatch(command: str):
         "crack": tools.run_crack,
         "doctor": tools.run_doctor,
         "export": export.run_export,
+        "search": search.run_search,
         "detect": analyze.run_detect,
         "report": analyze.run_report,
         "iptrace": analyze.run_iptrace,

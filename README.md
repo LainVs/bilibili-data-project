@@ -48,6 +48,7 @@ python main.py serve
 - `python main.py iptrace --bvid BV18q4y1V7pM` 批量排查指定视频观众中的多地跳跃与代理池瞬移账号
 - `python main.py detect --bvid BV18q4y1V7pM --export water_army.csv` 水军/刷屏/控评检测（复读率+短时爆发+属地聚集+异地瞬移综合打分，GUI「统计洞察」面板同步可用）
 - `python main.py report --bvid BV18q4y1V7pM --output report.html` 一键生成独立单文件离线 HTML 可视化研报（支持双滑块时间视窗动态缩放、多维交互式检索评论表格、情感/属地即时筛选）；加 `--no-sync` 可仅用本地数据离线生成、不联网补采
+- `python main.py search 关键词 --type all` 跨仓检索评论/弹幕/视频（支持 `空格,逗号`=同时包含、`OR`/`|`=任一、`"引号"`=精确短语，可加 `--start/--end/--exclude/--min-like`，`--export out.xlsx` 顺带导出）
 - `python main.py export --bvid BV18q4y1V7pM --format sqlite --output bundle.sqlite` 打包视频全量生态数据为独立便携 SQLite 数据库（无视 MySQL 环境，任何机器双击秒开）
 - `python main.py export --bvid BV18q4y1V7pM --format xlsx --output bundle.xlsx` 导出带有 Claude 质感排版、冻结表头与斑马纹的多 Sheet 格式化 Excel
 - `python main.py export --type comments --bvid BV18q4y1V7pM --output out.csv --limit 5000` 数据快速导出 (CSV / JSONL / XLSX / SQLite)
@@ -64,7 +65,7 @@ python main.py serve
 - **ETL 管道与清洗导出 (`etl/`)**：提供文本表情包净化、URL/@清除、IP属地规范化、用户行为与视频互动聚合画像，支持 UTF-8 BOM CSV 及 JSONL 流式导出。
 - **系统体检诊断 (`tools/doctor.py`)**：一键检测双库（D/E）延迟、Cookie 有效期、磁盘空间及算法引擎跑分。
 - **统计 V2 与可视化 (`analysis/` + `visualization/`)**：总览 10 项指标 + 5 大排行榜导出 + 趋势洞察（高频词、情感分布、24 小时活跃度、每日趋势折线图）。
-- **跨仓检索加速 (`storage/dao/search.py`)**：给归档分仓补 `idx_ctime` + 密度自适应执行计划 + 按最新时间倒序分仓并提前终止，把「搜一个词要扫 19 个仓」从分钟级压到秒级（详见下文「跨仓检索与索引策略」）。
+- **跨仓检索加速 (`storage/dao/search.py`)**：给归档分仓补 `idx_ctime` + 密度自适应执行计划 + 按最新时间倒序分仓并提前终止，把「搜一个词要扫 19 个仓」从分钟级压到秒级；叠加进程内 LRU 结果缓存（TTL 120s，仅缓存完整无失败结果）让重复检索近乎瞬时。详见下文「跨仓检索与索引策略」。
 - **GUI 交互优化**：支持 `b23.tv` 短链重定向自动解析、正则精确识别 BV 号、用户查询导出全部解锁、排行榜一键导出。
 - **工程化保障**：`ruff` 静态检查 + `pre-commit` 钩子 + GitHub Actions CI（Python 3.10/3.12 跑 lint 与单测）；核心写入路径（`storage/dao`）、异步写线程与 API 客户端均有离线单元测试。
 
