@@ -1,5 +1,8 @@
 # B站弹幕/评论采集与存储项目
 
+![研报总览](docs/images/report-overview.png)
+![水军检测](docs/images/report-detect.png)
+
 采集 B站视频的 **弹幕、评论** 及与之关联的 **用户 UID**，存入 MySQL。
 学习/练习性质，覆盖「采集 → 清洗 → 存储 → 反查 → 增量」全流程。
 
