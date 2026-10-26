@@ -182,36 +182,33 @@ class UserQueryPanel(ttk.Frame):
             )
             self.lbl_user.configure(text=f"共入库相关记录: 评论 {len(comments)} 条，弹幕 {len(danmaku)} 条")
 
+        c_rows = []
         for c in comments:
             title = (c.get("title") or "")[:40]
-            iid = self.tree.insert(
-                "",
-                "end",
-                values=(
-                    "评论",
-                    fmt_dt(c.get("ctime")),
-                    str(c.get("content", ""))[:200],
-                    c.get("ip_location") or "-",
-                    f"{c.get('bvid', '')} 赞 {c.get('like_num', 0)} {title}",
-                ),
-            )
-            self._rows[iid] = {"kind": "评论", **c}
-
+            c_rows.append((
+                "评论",
+                fmt_dt(c.get("ctime")),
+                str(c.get("content", ""))[:200],
+                c.get("ip_location") or "-",
+                f"{c.get('bvid', '')} 赞 {c.get('like_num', 0)} {title}",
+            ))
+        d_rows = []
         for d in danmaku:
             title = (d.get("title") or "")[:40]
             prog_s = f"{float(d.get('progress', 0) or 0):.1f}s"
-            iid = self.tree.insert(
-                "",
-                "end",
-                values=(
-                    "弹幕",
-                    fmt_dt(d.get("ctime")),
-                    str(d.get("content", ""))[:200],
-                    "-",
-                    f"{d.get('bvid', '')} {prog_s} {title}",
-                ),
-            )
-            self._rows[iid] = {"kind": "弹幕", **d}
+            d_rows.append((
+                "弹幕",
+                fmt_dt(d.get("ctime")),
+                str(d.get("content", ""))[:200],
+                "-",
+                f"{d.get('bvid', '')} {prog_s} {title}",
+            ))
+        # 批量灌入（一次重排），再按行建立 iid -> 数据映射
+        all_iids = self.tree.insert_many(c_rows + d_rows)
+        all_src = [{"kind": "评论", **c} for c in comments] + \
+                  [{"kind": "弹幕", **d} for d in danmaku]
+        for iid, src in zip(all_iids, all_src, strict=False):
+            self._rows[iid] = src
 
         total = len(comments) + len(danmaku)
         self.badge_count.set_status(

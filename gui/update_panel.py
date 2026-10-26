@@ -187,6 +187,7 @@ class UpdatePanel(ttk.Frame):
     def _render_videos(self, videos: list) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
+        batch = []
         for v in videos or []:
             c = v.get("comment_count", 0)
             d = v.get("danmaku_count", 0)
@@ -195,7 +196,8 @@ class UpdatePanel(ttk.Frame):
             flag = ""
             if c_done or d_done:
                 flag = "完成" if (c_done or not c) and (d_done or not d) else "未完"
-            self.tree.insert("", "end", values=(v["bvid"], v["title"][:60], c, d, flag))
+            batch.append((v["bvid"], v["title"][:60], c, d, flag))
+        self.tree.insert_many(batch)
 
     def _toggle(self) -> None:
         if self._running:

@@ -489,9 +489,8 @@ class StatsPanel(ttk.Frame):
         try:
             for iid in self.insight_terms.get_children():
                 self.insight_terms.delete(iid)
-            for t in (ins.get("terms") or [])[:20]:
-                self.insight_terms.insert("", "end",
-                                          values=(t.get("term"), t.get("cnt", 0)))
+            self.insight_terms.insert_many(
+                [(t.get("term"), t.get("cnt", 0)) for t in (ins.get("terms") or [])[:20]])
         except tk.TclError:
             pass
         self._show_insight_chart()
@@ -669,17 +668,17 @@ class StatsPanel(ttk.Frame):
         try:
             for iid in self.tree_detect.get_children():
                 self.tree_detect.delete(iid)
-            for r in self._detect_results:
-                level_txt = {"high": "高危", "suspect": "存疑"}.get(
-                    r.get("level"), "正常")
-                self.tree_detect.insert("", "end", values=(
-                    r.get("uid"), (r.get("uname") or "")[:16],
-                    r.get("total"), r.get("repeat_rate"),
-                    r.get("burst_max"),
-                    f"{r.get('ip_top') or '-'} {r.get('ip_ratio') or 0}",
-                    r.get("score"), level_txt,
-                    "+".join(r.get("hits") or []) or "-",
-                ))
+            self.tree_detect.insert_many([
+                (r.get("uid"), (r.get("uname") or "")[:16],
+                 r.get("total"), r.get("repeat_rate"),
+                 r.get("burst_max"),
+                 f"{r.get('ip_top') or '-'} {r.get('ip_ratio') or 0}",
+                 r.get("score"),
+                 {"high": "高危", "suspect": "存疑"}.get(r.get("level"), "正常"),
+                 "+".join(r.get("hits") or []) or "-",
+                 )
+                for r in self._detect_results
+            ])
         except tk.TclError:
             pass
         try:
@@ -1097,8 +1096,8 @@ class StatsPanel(ttk.Frame):
             for iid in tree.get_children():
                 tree.delete(iid)
             rows = ranks.get(key) or []
-            for r in rows:
-                tree.insert("", "end", values=self._fmt_row(key, r))
+            # 批量灌入：整榜一次性插入，只触发一次重排重绘
+            tree.insert_many([self._fmt_row(key, r) for r in rows])
             self._rank_cnts[key].configure(text=f"{len(rows)} 条")
         self.after(600, lambda: [
             self.prog.configure(value=0),

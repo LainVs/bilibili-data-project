@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from tkinter import ttk
 
 from gui.theme import C, F
+from gui.widgets.anim import SmoothScroll, fade_canvas_item
 
 
 class ClaudeBadge(tk.Frame):
@@ -251,7 +252,8 @@ class PillTabs(tk.Frame):
     def _on_hover(self, cv: tk.Canvas, enter: bool) -> None:
         if cv._active:
             return
-        cv.itemconfig(cv._bg_rect, fill=C.BG_HOVER if enter else self.cget("bg"))
+        # 药丸悬停颜色缓动：微过渡替代生硬跳变
+        fade_canvas_item(cv, cv._bg_rect, C.BG_HOVER if enter else self.cget("bg"))
         cv.itemconfig(cv._text_id, fill=C.FG_PRIMARY if enter else C.FG_SECONDARY)
 
     def _select(self, key: str) -> None:
@@ -318,6 +320,12 @@ class ModernConsole(tk.Frame):
         sb = ttk.Scrollbar(self, orient="vertical", command=self.txt.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.txt.configure(yscrollcommand=sb.set)
+
+        # 丝滑滚轮：控制台流式滚动也走 60fps 缓动
+        self._smooth = SmoothScroll(self.txt, fallback_frac=0.12)
+        self.txt.bind("<MouseWheel>", self._smooth.on_wheel, add="+")
+        self.txt.bind("<Button-4>", lambda e: self._smooth.on_wheel_step(-1), add="+")
+        self.txt.bind("<Button-5>", lambda e: self._smooth.on_wheel_step(1), add="+")
 
         # 语法标签
         self.txt.tag_configure("time", foreground=C.TERM_MUTED)

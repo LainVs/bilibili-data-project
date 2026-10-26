@@ -9,6 +9,27 @@ import tkinter as tk
 from tkinter import ttk
 
 
+def enable_windows_fluidity(root: tk.Tk | None = None) -> None:
+    """Windows 平台丝滑基础（幂等，任意系统下安全调用）：
+
+    Per-Monitor DPI 感知 —— 文字与控件按真实像素渲染，高分屏不再
+    模糊发虚，命中测试与所见一致（Windows 应用流畅感与质感的第一要素）。
+    必须在创建任何窗口/控件之前调用。
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 class C:
     """Claude 标志性色彩系统。"""
 

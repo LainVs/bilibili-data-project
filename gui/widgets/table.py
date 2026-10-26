@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from gui.theme import C, F
+from gui.widgets.anim import SmoothScroll
 
 _GRIP = 5  # 表头分割线附近多少像素内判定为"可拖"
 
@@ -62,6 +63,7 @@ class SmartTable(ttk.Treeview):
         self._drag_start_x: int = 0
         self._drag_start_w: int = 0
         self._last_cell: tuple[str, int] | None = None  # (row_id, col_idx)
+        self._edges_cache: dict[str, int] | None = None  # 列边界缓存（拖拽/设列时失效）
 
         # 斑马纹 tag
         self.tag_configure("stripe", background=C.BG_TABLE_ALT)
@@ -82,6 +84,12 @@ class SmartTable(ttk.Treeview):
         self.bind("<Button-3>", self._on_right_click, add="+")
         self.bind("<Button-2>", self._on_right_click, add="+")  # macOS 兼容
 
+        # macOS 般丝滑的滚轮缓动滚动
+        self._smooth = SmoothScroll(self)
+        self.bind("<MouseWheel>", self._smooth.on_wheel, add="+")
+        self.bind("<Button-4>", lambda e: self._smooth.on_wheel_step(-1), add="+")
+        self.bind("<Button-5>", lambda e: self._smooth.on_wheel_step(1), add="+")
+
     # ── 便捷 API ──
     def set_columns(self, columns: list[tuple[str, str, int]]) -> None:
         """列定义：[(key, 标题, 宽度字符数), ...]。"""
@@ -89,12 +97,13 @@ class SmartTable(ttk.Treeview):
         for key, text, w in columns:
             self.heading(key, text=text)
             self.column(key, width=w * 8, anchor="w", stretch=False)
+        self._invalidate_edges()
 
     def autosize(self, columns: list[tuple[str, str, int]]) -> None:
         self.set_columns(columns)
 
     def insert(self, parent, index, **kw):
-        """重写 insert 以自动应用斑马纹。"""
+        """重写 insert 以自动应用斑马纹（50ms 防抖合批）。"""
         iid = super().insert(parent, index, **kw)
         if self._stripe_after_id is None:
             self._stripe_after_id = self.after(50, self._apply_stripes)
@@ -105,17 +114,32 @@ class SmartTable(ttk.Treeview):
         if self._stripe_after_id is None:
             self._stripe_after_id = self.after(50, self._apply_stripes)
 
+    def insert_many(self, rows: list[tuple]) -> list[str]:
+        """批量插入：一次性灌入多行后再统一排斑马纹。
+
+        大结果集（排行榜/检索表格）填充时比逐行 insert 快数倍，
+        且整个过程只触发一次重排与一次重绘。返回与新行顺序对应的 iid 列表。
+        """
+        if not rows:
+            return []
+        iids = [super().insert("", "end", values=values) for values in rows]
+        if self._stripe_after_id is None:
+            self._stripe_after_id = self.after(50, self._apply_stripes)
+        return iids
+
     def _apply_stripes(self) -> None:
         self._stripe_after_id = None
         try:
             for i, iid in enumerate(self.get_children()):
                 tags = list(self.item(iid, "tags") or ())
-                if i % 2 == 1:
-                    if "stripe" not in tags:
-                        tags.append("stripe")
+                want = i % 2 == 1
+                has = "stripe" in tags
+                if want == has:
+                    continue  # 已是目标状态，跳过昂贵的 Tcl 往返
+                if want:
+                    tags.append("stripe")
                 else:
-                    if "stripe" in tags:
-                        tags.remove("stripe")
+                    tags.remove("stripe")
                 self.item(iid, tags=tags)
         except tk.TclError:
             pass
@@ -342,8 +366,14 @@ class SmartTable(ttk.Treeview):
     def _on_motion(self, event) -> None:
         if self._drag_col:
             return
+        # 缓存列边界：只在列宽实际变化后重算，避免每个鼠标移动事件
+        # 都触发一轮全列 Tcl 往返（高频 Motion 下的隐形卡顿源）
+        edges = self._edges_cache
+        if edges is None:
+            edges = self._col_edges()
+            self._edges_cache = edges
         near = None
-        for cid, x in self._col_edges().items():
+        for cid, x in edges.items():
             if abs(event.x - x) <= _GRIP:
                 near = cid
                 break
@@ -354,6 +384,9 @@ class SmartTable(ttk.Treeview):
                 except tk.TclError:
                     pass
             self._resize_anchor = near
+
+    def _invalidate_edges(self) -> None:
+        self._edges_cache = None
 
     def _on_press(self, event) -> None:
         if not self._resize_anchor:
@@ -383,10 +416,12 @@ class SmartTable(ttk.Treeview):
             self.column(self._drag_col, width=w)
         except tk.TclError:
             pass
+        self._invalidate_edges()
         return "break"
 
     def _on_release(self, event) -> None:
         self._drag_col = None
+        self._invalidate_edges()
 
     def _on_leave(self, event) -> None:
         if not self._drag_col:

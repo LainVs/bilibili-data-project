@@ -593,20 +593,23 @@ class SearchPanel(ttk.Frame):
                 [("time", "时间", 14), ("sender", "发送者(UID)", 18),
                  ("loc", "属地", 10), ("like", "赞", 6), ("video", "视频", 40),
                  ("content", "内容", 90)])
+            batch = []
             for r in rows:
                 sender = (r.get("uname") or str(r.get("uid") or ""))
                 if r.get("uid"):
                     sender = f"{r.get('uname') or ''}({r.get('uid')})" if r.get("uname") else str(r.get("uid"))
-                iid = tree.insert("", "end", values=(
+                batch.append((
                     fmt_dt(r.get("ctime")), sender, r.get("ip_location") or "",
                     r.get("like_num", 0),
                     f"{r.get('bvid', '')} {str(r.get('title', ''))[:26]}",
                     str(r.get("content", ""))[:120]))
+            for iid, r in zip(tree.insert_many(batch), rows, strict=False):
                 self._list_iids[iid] = r
         elif sec == "dmk":
             tree.set_columns(
                 [("time", "时间", 14), ("sender", "发送者(UID)", 18),
                  ("pos", "进度", 8), ("video", "视频", 40), ("content", "内容", 90)])
+            batch = []
             for r in rows:
                 sender = r.get("uname") or ""
                 uid = r.get("uid")
@@ -614,25 +617,28 @@ class SearchPanel(ttk.Frame):
                     hid = f"#{r.get('mid_hash')}" if r.get("mid_hash") else ""
                     code = f"({uid or hid})" if (uid or hid) else ""
                     sender = f"{sender}{code}"
-                iid = tree.insert("", "end", values=(
+                batch.append((
                     fmt_dt(r.get("ctime")), sender,
                     f"{float(r.get('progress', 0) or 0):.1f}s",
                     f"{r.get('bvid', '')} {str(r.get('title', ''))[:26]}",
                     str(r.get("content", ""))[:120]))
+            for iid, r in zip(tree.insert_many(batch), rows, strict=False):
                 self._list_iids[iid] = r
         else:
             tree.set_columns(
                 [("pub", "发布时间", 14), ("title", "标题", 52),
                  ("bvid", "BV", 16), ("up", "UP", 20),
                  ("cmt", "评论", 8), ("dmk", "弹幕", 8)])
+            batch = []
             for r in rows:
                 up = r.get("owner_name") or r.get("owner_uid") or ""
                 if r.get("owner_uid") and r.get("owner_name"):
                     up = f"{up}({r.get('owner_uid')})"
-                iid = tree.insert("", "end", values=(
+                batch.append((
                     fmt_dt(r.get("pubdate")), str(r.get("title", ""))[:50],
                     r.get("bvid", ""), up, r.get("comment_count", 0),
                     r.get("danmaku_count", 0)))
+            for iid, r in zip(tree.insert_many(batch), rows, strict=False):
                 self._list_iids[iid] = r
         if not rows:
             # 空状态：给表格一行引导，证明不是面板坏了

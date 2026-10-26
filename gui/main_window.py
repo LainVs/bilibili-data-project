@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 
 from gui.theme import C, F, S, apply_theme
 from gui.widgets import ToolTip
+from gui.widgets.anim import fade_canvas_item
 from storage.session import load_session, save_session
 
 logger = logging.getLogger(__name__)
@@ -162,10 +163,11 @@ class MainWindow(tk.Tk):
         if cv._nav_active:
             return
         try:
-            cv.itemconfigure(cv._bg_rect,
-                             fill=C.BG_NAV_HOVER if enter else C.BG_SIDEBAR)
-            cv.itemconfigure(cv._label_id,
-                             fill=C.FG_INVERSE if enter else C.FG_NAV)
+            # 颜色缓动过渡：悬停呼吸感，而不是生硬跳变
+            fade_canvas_item(cv, cv._bg_rect,
+                             C.BG_NAV_HOVER if enter else C.BG_SIDEBAR)
+            fade_canvas_item(cv, cv._label_id,
+                             C.FG_INVERSE if enter else C.FG_NAV)
         except tk.TclError:
             pass
 
@@ -180,6 +182,42 @@ class MainWindow(tk.Tk):
                              fill=C.FG_NAV_ACTIVE if active else C.FG_NAV)
             cv.itemconfigure(cv._label_id,
                              fill=C.FG_NAV_ACTIVE if active else C.FG_NAV)
+        except tk.TclError:
+            pass
+
+    def _slide_indicator(self, from_label: str, to_label: str) -> None:
+        """激活态切换时，新按钮的陶土竖条做一个 120ms 的生长动效。
+
+        Tk 的 Canvas 元素无法跨按钮容器平滑位移（各自独立画布），
+        用"旧条立即消失 + 新条弹性生长"替代，视觉上依然是连贯的响应。
+        """
+        dst = self._nav_btn_by_label.get(to_label)
+        if dst is None:
+            return
+        try:
+            h = dst.winfo_height() or 52
+        except tk.TclError:
+            h = 52
+        steps, dur = 7, 16
+        state = {"i": 0}
+
+        def _grow() -> None:
+            state["i"] += 1
+            t = state["i"] / steps
+            try:
+                # easeOutCubic：先快后柔的生长曲线
+                half = (h - 24) / 2 * (1 - (1 - min(1.0, t)) ** 3)
+                dst.coords(dst._ind_id, 4, h // 2 - half, 7, h // 2 + half)
+                if state["i"] < steps:
+                    dst.after(dur, _grow)
+                else:
+                    dst.coords(dst._ind_id, 4, 12, 7, h - 12)
+            except tk.TclError:
+                pass
+
+        try:
+            dst.coords(dst._ind_id, 4, h // 2, 7, h // 2)
+            dst.after(dur, _grow)
         except tk.TclError:
             pass
 
@@ -205,15 +243,19 @@ class MainWindow(tk.Tk):
         return panel
 
     def _switch(self, key: str) -> None:
-        """切换右侧面板，高亮导航按钮。"""
+        """切换右侧面板，高亮导航按钮（带滑动指示条动效）。"""
         if key == self._current_key and key in self._pages:
             return
+        prev = self._current_key
         self._current_key = key
         panel = self._get_panel(key)
         panel.tkraise()
         self._clear_dot(key)
         for cv, k in self._nav_buttons.items():
             self._nav_set_active(cv, k == key)
+        # 陶土指示条从上一项滑到新项（macOS 分段控件的滑动感）
+        if prev and prev != key:
+            self._slide_indicator(prev, key)
 
     # ═══════════════════ 通知小红点 ═══════════════════
 
@@ -664,5 +706,8 @@ class MainWindow(tk.Tk):
 
 
 def run() -> None:
+    from gui.theme import enable_windows_fluidity
+
+    enable_windows_fluidity(None)  # DPI 感知：必须在首个窗口创建前
     app = MainWindow()
     app.mainloop()

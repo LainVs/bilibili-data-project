@@ -235,9 +235,24 @@ class CollectPanel(ttk.Frame):
         sb_y.grid(row=0, column=1, sticky="ns")
         sb_x.grid(row=1, column=0, sticky="ew")
         # 用户手动上翻（滚轮/触控板/拖动滚动条）→ 解除"跟随底部"
-        self.txt.bind("<MouseWheel>", self._on_wheel)
-        self.txt.bind("<Button-4>", lambda _e: self._user_scroll_up())
-        self.txt.bind("<Button-5>", lambda _e: self._user_scroll_down())
+        # 滚轮走 60fps 缓动平滑滚动，同时保留上下翻页意图跟踪
+        from gui.widgets.anim import SmoothScroll
+
+        self._stream_smooth = SmoothScroll(self.txt, fallback_frac=0.12)
+
+        def _wheel(event, sc=self._stream_smooth):
+            delta = getattr(event, "delta", 0)
+            if delta > 0:
+                self._stick_bottom = False
+            elif delta < 0 and self._is_at_bottom():
+                self._stick_bottom = True
+            return sc.on_wheel(event)
+
+        self.txt.bind("<MouseWheel>", _wheel)
+        self.txt.bind("<Button-4>", lambda _e: (self._user_scroll_up(),
+                                                self._stream_smooth.on_wheel_step(-1))[1])
+        self.txt.bind("<Button-5>", lambda _e: (self._user_scroll_down(),
+                                                self._stream_smooth.on_wheel_step(1))[1])
         self.txt.bind("<KeyPress-Up>", lambda _e: self._mark_no_follow())
         self.txt.bind("<KeyPress-Down>", lambda _e: self._mark_no_follow())
         # 滚动条拖动：按下即锁定不跟随，松开时按位置恢复
@@ -580,6 +595,10 @@ class CollectPanel(ttk.Frame):
 
     def _see_end(self) -> None:
         try:
+            # 流式跟随底部时终止滚轮动画，避免缓动帧把视口拉离底部
+            smooth = getattr(self, "_stream_smooth", None)
+            if smooth is not None:
+                smooth.cancel()
             self.txt.see("end")
         except tk.TclError:
             pass
