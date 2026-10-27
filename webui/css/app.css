@@ -136,6 +136,51 @@ html, body {
 .stat-value { font-size: 22px; font-weight: 700; margin-top: 6px; }
 .stat-sub { font-size: 11px; color: var(--fg-muted); margin-top: 3px; }
 
+/* ── 搜索页 ── */
+.search-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+.search-input {
+  flex: 1; padding: 9px 13px; font-size: 13.5px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-card); color: var(--fg);
+  outline: none; transition: border-color 0.15s ease;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-kind {
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-card); color: var(--fg); font-size: 13px; cursor: pointer;
+}
+.btn-accent {
+  padding: 9px 22px; border: none; border-radius: 8px;
+  background: var(--accent); color: #fdfcfb; font-size: 13.5px; font-weight: 600;
+  cursor: pointer; transition: background-color 0.15s ease, transform 0.06s ease;
+}
+.btn-accent:hover { background: var(--accent-hover); }
+.btn-accent:active { transform: scale(0.97); }
+.btn-accent:disabled { opacity: 0.55; cursor: default; }
+.search-status { font-size: 12px; color: var(--fg-muted); min-height: 18px; margin-bottom: 8px; }
+
+.result-table-wrap {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 10px; overflow: auto; max-height: calc(100vh - 260px);
+}
+.result-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.result-table th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: left; padding: 9px 12px;
+  background: var(--bg-muted); color: var(--fg-muted);
+  font-weight: 600; white-space: nowrap;
+}
+.result-table td {
+  padding: 8px 12px; border-top: 1px solid var(--border-light, #f0eee6);
+  color: var(--fg); vertical-align: top;
+}
+.result-table tbody tr:nth-child(even) { background: #fcfbfa; }
+.result-table tbody tr { transition: background-color 0.1s ease; }
+.result-table tbody tr:hover { background: var(--accent-light); }
+.result-table .cell-content { max-width: 420px; }
+.cell-muted { color: var(--fg-muted); }
+.empty-hint { text-align: center; color: var(--fg-muted); padding: 40px 0; font-size: 13px; }
+
 /* ── 占位卡（迁移中的页面）── */
 .placeholder-card { text-align: center; padding: 48px 24px; }
 .placeholder-icon { font-size: 36px; }

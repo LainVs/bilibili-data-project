@@ -53,6 +53,20 @@ class JsApi:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    # ── 全局搜索页 ──
+    def search(self, keyword: str, kind: str = "comments", limit: int = 100,
+               start: str = "", end: str = "", exclude: str = "",
+               min_like: int = 0) -> dict:
+        """跨仓检索（前端 await 调用，注意此调用可能耗时数秒）。"""
+        try:
+            from gui.web_bridge import run_search
+
+            return run_search(keyword, kind=kind, limit=limit, start=start,
+                              end=end, exclude=exclude, min_like=min_like)
+        except Exception as exc:
+            logger.exception("search failed")
+            return {"ok": False, "error": str(exc), "rows": [], "total": 0}
+
     # ── 窗口控制 ──
     def minimize(self) -> None:
         try:

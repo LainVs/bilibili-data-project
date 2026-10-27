@@ -77,11 +77,29 @@
       </section>
 
       <section class="page" data-page="search">
-        <header class="page-head"><h1>全局搜索</h1><p class="hint">跨仓检索评论/弹幕/视频（迁移中）</p></header>
-        <div class="card placeholder-card">
-          <div class="placeholder-icon">🚧</div>
-          <div class="placeholder-title">此页面迁移中</div>
-          <div class="placeholder-sub">检索页将随第二批迁移。暂用 python main.py search 命令行。</div>
+        <header class="page-head">
+          <h1>全局搜索</h1>
+          <p class="hint">跨仓检索评论/弹幕/视频 · 空格=同时包含 · OR=任一 · "引号"=精确短语</p>
+        </header>
+        <div class="search-bar">
+          <input id="search-input" class="search-input" type="text"
+                 placeholder="输入关键词，如：python OR 模型 &quot;神评&quot;" />
+          <select id="search-kind" class="search-kind">
+            <option value="comments">评论</option>
+            <option value="danmaku">弹幕</option>
+            <option value="videos">视频</option>
+          </select>
+          <button id="search-btn" class="btn-accent">搜索</button>
+        </div>
+        <div class="search-status" id="search-status"></div>
+        <div class="result-table-wrap">
+          <table class="result-table" id="result-table">
+            <thead id="result-head"></thead>
+            <tbody id="result-body"></tbody>
+          </table>
+          <div class="empty-hint" id="search-empty" style="display:none">
+            暂无匹配内容 — 换关键词或时间范围再试
+          </div>
         </div>
       </section>
 

@@ -19,6 +19,7 @@ function showPage(name) {
   // 切入页面才拉数据（一次性，不轮询）
   if (name === "connection") refreshConnection();
   if (name === "stats") refreshStats();
+  if (name === "search") setTimeout(() => $("#search-input").focus(), 50);
 }
 
 $("#nav").addEventListener("click", (e) => {
@@ -107,6 +108,126 @@ async function refreshStats() {
     log("统计读取失败: " + err, "err");
   }
 }
+
+/* ── 全局搜索页 ── */
+const SEARCH_COLS = {
+  comments: [
+    ["ctime", "时间", 130], ["sender", "发送者", 170],
+    ["ip_location", "属地", 90], ["like_num", "赞", 60],
+    ["video", "视频", 260], ["content", "内容", 0],
+  ],
+  danmaku: [
+    ["ctime", "时间", 130], ["sender", "发送者", 170],
+    ["progress", "进度", 80], ["video", "视频", 260], ["content", "内容", 0],
+  ],
+  videos: [
+    ["pubdate", "发布时间", 130], ["title", "标题", 0],
+    ["bvid", "BV", 140], ["owner", "UP", 170],
+    ["comment_count", "评论", 70], ["danmaku_count", "弹幕", 70],
+  ],
+};
+
+function fmtRow(kind, r) {
+  const sender = r.uname
+    ? (r.uid ? `${r.uname}(${r.uid})` : r.uname)
+    : (r.uid || r.mid_hash ? `#${r.mid_hash || r.uid}` : "-");
+  if (kind === "comments") {
+    return {
+      ctime: r.ctime || "", sender,
+      ip_location: r.ip_location || "-",
+      like_num: r.like_num ?? 0,
+      video: `${r.bvid || ""} ${String(r.title || "").slice(0, 24)}`,
+      content: String(r.content || "").slice(0, 120),
+    };
+  }
+  if (kind === "danmaku") {
+    const prog = r.progress != null ? `${Number(r.progress).toFixed(1)}s` : "-";
+    return { ctime: r.ctime || "", sender, progress: prog,
+             video: `${r.bvid || ""} ${String(r.title || "").slice(0, 24)}`,
+             content: String(r.content || "").slice(0, 120) };
+  }
+  const owner = r.owner_name
+    ? (r.owner_uid ? `${r.owner_name}(${r.owner_uid})` : r.owner_name)
+    : (r.owner_uid || "-");
+  return { pubdate: r.pubdate || "", title: String(r.title || "").slice(0, 48),
+           bvid: r.bvid || "", owner,
+           comment_count: r.comment_count ?? 0, danmaku_count: r.danmaku_count ?? 0 };
+}
+
+let searching = false;
+
+async function doSearch() {
+  if (searching) return;
+  const bridge = api();
+  if (!bridge) return;
+  const kw = $("#search-input").value.trim();
+  if (!kw) { $("#search-status").textContent = "请输入关键词"; return; }
+  const kind = $("#search-kind").value;
+
+  searching = true;
+  const btn = $("#search-btn");
+  btn.disabled = true;
+  btn.textContent = "检索中…";
+  $("#search-status").textContent = "正在跨仓检索（E 库为 HDD，可能数秒）…";
+  $("#result-body").innerHTML = "";
+  $("#search-empty").style.display = "none";
+  const t0 = performance.now();
+
+  try {
+    const res = await bridge.search(kw, kind, 100);
+    const ms = Math.round(performance.now() - t0);
+    if (!res || res.ok !== true) throw new Error(res && res.error || "检索失败");
+    const rows = res.rows || [];
+    renderResults(kind, rows);
+    const failedNote = (res.failed && res.failed.length) ? `，${res.failed.length} 个仓不可达` : "";
+    $("#search-status").textContent =
+      `共 ${rows.length} 条 · 耗时 ${ms}ms${failedNote}（缓存命中则近乎瞬时）`;
+  } catch (err) {
+    $("#search-status").textContent = "检索失败: " + err;
+    log("搜索失败: " + err, "err");
+  } finally {
+    searching = false;
+    btn.disabled = false;
+    btn.textContent = "搜索";
+  }
+}
+
+function renderResults(kind, rows) {
+  const head = $("#result-head");
+  const body = $("#result-body");
+  head.innerHTML = "";
+  body.innerHTML = "";
+  const cols = SEARCH_COLS[kind] || SEARCH_COLS.comments;
+  head.innerHTML = "<tr>" + cols.map(([k, label]) => `<th>${label}</th>`).join("") + "</tr>";
+  if (!rows.length) {
+    $("#search-empty").style.display = "block";
+    return;
+  }
+  $("#search-empty").style.display = "none";
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const data = fmtRow(kind, r);
+    const tr = document.createElement("tr");
+    tr.innerHTML = cols.map(([k, , w]) => {
+      const v = String(data[k] ?? "");
+      const cls = k === "content" || k === "title" ? ' class="cell-content"' : "";
+      const title = v.length > 40 ? ` title="${v.replace(/"/g, "&quot;")}"` : "";
+      return `<td${cls}${title}>${escapeHtml(v) || '<span class="cell-muted">-</span>'}</td>`;
+    }).join("");
+    frag.appendChild(tr);
+  }
+  body.appendChild(frag);
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+$("#search-btn").addEventListener("click", doSearch);
+$("#search-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") doSearch();
+});
 
 /* ── 启动 ── */
 window.addEventListener("pywebviewready", () => {
