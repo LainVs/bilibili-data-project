@@ -2,3 +2,6 @@
 requests>=2.31
 pymysql>=1.1.0
 APScheduler>=3.10
+
+# WebView2 (GPU) 图形界面
+pywebview>=5.0

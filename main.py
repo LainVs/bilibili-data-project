@@ -59,7 +59,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p_post.add_argument("targets", nargs="+", help="帖子链接或ID，可多个")
     p_post.add_argument("--incremental", action="store_true", help="增量：只采新评论")
 
-    sub.add_parser("gui", help="启动图形界面（定向采集/UP主/帖子/增量轮询/用户查询）")
+    p_gui = sub.add_parser("gui", help="启动图形界面（默认 WebView2/GPU 引擎，--engine tk 回退经典版）")
+    p_gui.add_argument("--engine", choices=["web", "tk"], default="web",
+                       help="界面引擎：web=WebView2 GPU 渲染（默认），tk=经典 Tk 版")
 
     p_stats = sub.add_parser("stats", help="统计：总览/趋势洞察/导出CSV")
     p_stats.add_argument("--overview", action="store_true", help="只打总览10项")

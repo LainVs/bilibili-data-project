@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>B站弹幕/评论采集系统</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div class="shell">
+    <!-- ── 侧边栏 ── -->
+    <aside class="sidebar">
+      <div class="logo">B</div>
+      <div class="sep"></div>
+      <nav class="nav" id="nav">
+        <button class="nav-item active" data-page="connection"><span class="nav-icon">⚡</span><span class="nav-label">连接</span></button>
+        <button class="nav-item" data-page="collect"><span class="nav-icon">🎯</span><span class="nav-label">采集</span></button>
+        <button class="nav-item" data-page="stats"><span class="nav-icon">📊</span><span class="nav-label">统计</span></button>
+        <button class="nav-item" data-page="search"><span class="nav-icon">🔍</span><span class="nav-label">搜索</span></button>
+        <button class="nav-item" data-page="report"><span class="nav-icon">📄</span><span class="nav-label">研报</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-foot">WebView2 · GPU</div>
+    </aside>
+
+    <!-- ── 内容区：页面 DOM 常驻，display:none 切换（零重建成本）── -->
+    <main class="main">
+      <section class="page active" data-page="connection">
+        <header class="page-head">
+          <h1>存储与数据库状态</h1>
+          <p class="hint">双 MySQL 架构：缓冲库 D (高吞吐写入) + 归档库 E (移动硬盘长效冷存)</p>
+        </header>
+        <div class="cards-row">
+          <div class="card" id="card-d">
+            <div class="card-head">
+              <div><div class="card-title">缓冲库 D (写入 3306)</div><div class="card-sub">服务: MySQL80 · 主存储表</div></div>
+              <span class="badge" id="badge-d">检测中</span>
+            </div>
+            <div class="kv"><span class="k">实例地址</span><span class="v" id="d-addr">--</span></div>
+            <div class="kv"><span class="k">连通状态</span><span class="v" id="d-msg">--</span></div>
+          </div>
+          <div class="card" id="card-e">
+            <div class="card-head">
+              <div><div class="card-title">归档库 E (查询 3307)</div><div class="card-sub">服务: MySQL80-E · 移动硬盘存储</div></div>
+              <span class="badge" id="badge-e">检测中</span>
+            </div>
+            <div class="kv"><span class="k">实例地址</span><span class="v" id="e-addr">--</span></div>
+            <div class="kv"><span class="k">连通状态</span><span class="v" id="e-msg">--</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">执行与同步日志</div><div class="card-sub">实时输出底层跨库拷贝、校验与迁移信息</div></div></div>
+          <div class="console" id="console"><div class="console-line">就绪。等待操作…</div></div>
+        </div>
+      </section>
+
+      <section class="page" data-page="collect">
+        <header class="page-head">
+          <h1>定向采集</h1>
+          <p class="hint">输入 BV / UID / 收藏夹，实时流式采集弹幕与评论（此页由 Tk 版逐步迁移）</p>
+        </header>
+        <div class="card placeholder-card">
+          <div class="placeholder-icon">🚧</div>
+          <div class="placeholder-title">此页面迁移中</div>
+          <div class="placeholder-sub">采集页交互复杂（实时流/批量/多模式），将在连接页试点验证后迁移。<br>当前可切换到旧版引擎：python main.py gui --engine tk</div>
+        </div>
+      </section>
+
+      <section class="page" data-page="stats">
+        <header class="page-head">
+          <h1>统计洞察</h1>
+          <p class="hint">总览指标来自本地缓存，秒开；点刷新才触发全表聚合</p>
+        </header>
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card"><div class="stat-label">加载中…</div></div>
+        </div>
+      </section>
+
+      <section class="page" data-page="search">
+        <header class="page-head"><h1>全局搜索</h1><p class="hint">跨仓检索评论/弹幕/视频（迁移中）</p></header>
+        <div class="card placeholder-card">
+          <div class="placeholder-icon">🚧</div>
+          <div class="placeholder-title">此页面迁移中</div>
+          <div class="placeholder-sub">检索页将随第二批迁移。暂用 python main.py search 命令行。</div>
+        </div>
+      </section>
+
+      <section class="page" data-page="report">
+        <header class="page-head"><h1>研报生成</h1><p class="hint">单文件离线 HTML 研报（迁移中）</p></header>
+        <div class="card placeholder-card">
+          <div class="placeholder-icon">🚧</div>
+          <div class="placeholder-title">此页面迁移中</div>
+          <div class="placeholder-sub">暂用 python main.py report --bvid BVxx 命令行生成。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

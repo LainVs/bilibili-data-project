@@ -22,7 +22,12 @@ def run_version(args) -> int:
 
 
 def run_gui(args) -> int:
-    from gui.main_window import run as run_gui
+    engine = getattr(args, "engine", "web") or "web"
+    if engine == "tk":
+        from gui.main_window import run as run_tk
 
-    run_gui()
-    return 0
+        run_tk()
+        return 0
+    from gui.webview_app import run as run_web
+
+    return run_web()
