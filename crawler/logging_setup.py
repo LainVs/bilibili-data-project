@@ -1,13 +1,29 @@
-"""日志配置：输出到控制台 + logs/ 文件（异步落盘，不阻塞采集线程）。"""
+"""日志配置：输出到控制台 + logs/ 文件（异步落盘，不阻塞采集线程）。
+
+磁盘占用策略（对齐"安装体积小"的项目约定）：
+- crawler.log 轮转上限 5MB × 3 份 ≈ 20MB 封顶；
+- setup_logging 时在后台线程做一次陈旧日志清扫：logs/ 下已知日志模式
+  且超过保留期的文件直接删除（研报 HTML 等用户数据不受影响）。
+"""
 from __future__ import annotations
 
 import logging
 import logging.handlers
 import queue
+import time
 
 from config import ROOT_DIR
 
 LOGS_DIR = ROOT_DIR / "logs"
+
+# 轮转体量：单文件 5MB，保留 3 份备份（当前 + 3 备份 ≈ 20MB 封顶）
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+# 杂散陈旧日志的清理：仅匹配已知运行日志文件名模式，保留期 7 天。
+# 研报（report_*.html）、图表目录等用户产物一律不碰。
+_STALE_PATTERNS = ("run*.out", "run*.err", "*.log", "*.log.*")
+_STALE_AFTER_DAYS = 7
 
 _listener = None
 
@@ -21,6 +37,34 @@ class _FlushRotatingFileHandler(logging.handlers.RotatingFileHandler):
             self.flush()
         except Exception:
             pass
+
+
+def cleanup_stale_logs(max_age_days: int = _STALE_AFTER_DAYS) -> int:
+    """清扫 logs/ 下超过保留期的已知日志文件，返回删除数（异常静默）。"""
+    removed = 0
+    try:
+        if not LOGS_DIR.is_dir():
+            return 0
+        cutoff = time.time() - max_age_days * 86400
+        for pat in _STALE_PATTERNS:
+            for f in LOGS_DIR.glob(pat):
+                try:
+                    # 只删"文件"且超期；stats_charts/ 等子目录与研报 HTML 不在模式内
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+    except Exception:
+        pass
+    return removed
+
+
+def _cleanup_async() -> None:
+    """后台线程清扫：绝不让磁盘 IO 拖慢启动路径。"""
+    import threading
+
+    threading.Thread(target=cleanup_stale_logs, daemon=True).start()
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -41,8 +85,8 @@ def setup_logging(level: int = logging.INFO) -> None:
         LOGS_DIR.mkdir(exist_ok=True)
         file_handler = _FlushRotatingFileHandler(
             LOGS_DIR / "crawler.log",
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8",
         )
         file_handler.setFormatter(fmt)
@@ -64,3 +108,6 @@ def setup_logging(level: int = logging.INFO) -> None:
                 pass
 
         _atexit.register(_stop_listener)
+
+        # 磁盘瘦身：超期陈旧日志后台清扫（不阻塞启动）
+        _cleanup_async()
