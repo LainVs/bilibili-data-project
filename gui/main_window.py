@@ -706,8 +706,5 @@ class MainWindow(tk.Tk):
 
 
 def run() -> None:
-    from gui.theme import enable_windows_fluidity
-
-    enable_windows_fluidity(None)  # DPI 感知：必须在首个窗口创建前
     app = MainWindow()
     app.mainloop()

@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from tkinter import ttk
 
 from gui.theme import C, F
-from gui.widgets.anim import SmoothScroll, fade_canvas_item
+from gui.widgets.anim import fade_canvas_item
 
 
 class ClaudeBadge(tk.Frame):
@@ -320,12 +320,7 @@ class ModernConsole(tk.Frame):
         sb = ttk.Scrollbar(self, orient="vertical", command=self.txt.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.txt.configure(yscrollcommand=sb.set)
-
-        # 丝滑滚轮：控制台流式滚动也走 60fps 缓动
-        self._smooth = SmoothScroll(self.txt, fallback_frac=0.12)
-        self.txt.bind("<MouseWheel>", self._smooth.on_wheel, add="+")
-        self.txt.bind("<Button-4>", lambda e: self._smooth.on_wheel_step(-1), add="+")
-        self.txt.bind("<Button-5>", lambda e: self._smooth.on_wheel_step(1), add="+")
+        # 注意：Text 大文本每帧全量重排，不做动画滚动（与实时流面板同理）
 
         # 语法标签
         self.txt.tag_configure("time", foreground=C.TERM_MUTED)

@@ -55,7 +55,7 @@ class SmoothScroll:
     - 高分屏精密触控板的小步长 delta 也能累积出细腻滚动。
     """
 
-    DURATION_MS = 170.0   # 单次滚轮动画时长
+    DURATION_MS = 140.0   # 单次滚轮动画时长（偏短：跟手优先，避免拖泥带水）
     LINES_PER_NOTCH = 3   # 每格滚轮滚动 3 行（对齐 macOS 触控板手感）
 
     def __init__(self, widget: tk.Widget, fallback_frac: float = 0.16) -> None:

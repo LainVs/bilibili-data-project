@@ -152,24 +152,10 @@ class BroadPanel(ttk.Frame):
         self.txt.grid(row=0, column=0, sticky="nsew")
         sb2.grid(row=0, column=1, sticky="ns")
         # 用户手动上翻（滚轮/触控板/拖动滚动条）→ 解除"跟随底部"
-        # 滚轮走 60fps 缓动平滑滚动，同时保留上下翻页意图跟踪
-        from gui.widgets.anim import SmoothScroll
-
-        self._stream_smooth = SmoothScroll(self.txt, fallback_frac=0.12)
-
-        def _wheel(event, sc=self._stream_smooth):
-            delta = getattr(event, "delta", 0)
-            if delta > 0:
-                self._stick_bottom = False
-            elif delta < 0 and self._is_at_bottom():
-                self._stick_bottom = True
-            return sc.on_wheel(event)
-
-        self.txt.bind("<MouseWheel>", _wheel)
-        self.txt.bind("<Button-4>", lambda _e: (self._user_scroll_up(),
-                                                self._stream_smooth.on_wheel_step(-1))[1])
-        self.txt.bind("<Button-5>", lambda _e: (self._user_scroll_down(),
-                                                self._stream_smooth.on_wheel_step(1))[1])
+        # 注意：Text 大文本每帧全量重排，动画滚动反而更耗 CPU，保持原生直滚
+        self.txt.bind("<MouseWheel>", self._on_wheel)
+        self.txt.bind("<Button-4>", lambda _e: self._user_scroll_up())
+        self.txt.bind("<Button-5>", lambda _e: self._user_scroll_down())
         # 滚动条拖动：按下即锁定不跟随，松开时按位置恢复
         sb2.bind("<ButtonPress-1>", lambda _e: setattr(self, "_drag", True))
         sb2.bind("<ButtonRelease-1>", self._on_sb_release)
@@ -379,10 +365,6 @@ class BroadPanel(ttk.Frame):
 
     def _see_end(self) -> None:
         try:
-            # 流式跟随底部时终止滚轮动画，避免缓动帧把视口拉离底部
-            smooth = getattr(self, "_stream_smooth", None)
-            if smooth is not None:
-                smooth.cancel()
             self.txt.see("end")
         except tk.TclError:
             pass
