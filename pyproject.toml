@@ -10,11 +10,40 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# WebView2 (GPU) 图形界面引擎。设为可选：无头/服务器环境只需 CLI，
+# 不必拉取 GUI 依赖。Windows 运行时由 requirements.txt 保证安装。
+web = ["pywebview>=5.0"]
 charts = ["matplotlib>=3.8"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "pre-commit>=3.7",
+]
+
+# 构建后端：pip install -e . 必需。显式声明包发现规则，
+# 否则 setuptools 会把 logs/（日志目录）与 webui/（前端静态资源）
+# 误判为 Python 包而拒绝构建（CI 一直红在此处）。
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "analysis",
+    "commands",
+    "config",
+    "crawler",
+    "crawler.api",
+    "crawler.pipelines",
+    "crawler.tasks",
+    "crc32_crack",
+    "etl",
+    "gui",
+    "gui.widgets",
+    "reporting",
+    "storage",
+    "storage.dao",
+    "visualization",
 ]
 
 [tool.ruff]
