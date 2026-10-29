@@ -229,6 +229,138 @@ $("#search-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") doSearch();
 });
 
+/* ── 研报页 ── */
+let reportTask = null;
+let lastReportPath = "";
+
+function rpBadge(text, cls) {
+  const b = $("#rp-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function rpSections() {
+  const out = {};
+  $$("#rp-sections input[data-sec]").forEach((el) => { out[el.dataset.sec] = el.checked; });
+  return out;
+}
+
+/* 通用长任务轮询：每 600ms 问一次，完成/失败即停 */
+async function pollTask(taskId, onTick) {
+  const bridge = api();
+  while (bridge) {
+    await new Promise((r) => setTimeout(r, 600));
+    let st;
+    try {
+      st = await bridge.task_status(taskId);
+    } catch (e) {
+      return { state: "failed", error: String(e) };
+    }
+    if (onTick) onTick(st);
+    if (st && st.state !== "running") return st;
+  }
+  return { state: "failed", error: "桥不可用" };
+}
+
+async function startReport() {
+  const bridge = api();
+  if (!bridge || reportTask) return;
+  const bvid = $("#rp-bvid").value.trim();
+  if (!bvid) { $("#rp-status").textContent = "请输入要生成研报的视频 BV 号（如 BV1tJ4m1T7QL）"; return; }
+
+  reportTask = "starting";
+  $("#rp-generate").disabled = true;
+  $("#rp-open").disabled = true;
+  $("#rp-folder").disabled = true;
+  rpBadge("生成中", "checking");
+  $("#rp-status").textContent = "正在装配研报…";
+  $("#rp-progress-wrap").style.display = "block";
+  $("#rp-progress").className = "progress-bar indeterminate";
+
+  try {
+    const started = await bridge.start_report(
+      bvid, $("#rp-out").value.trim(), Number($("#rp-limit").value) || 0,
+      rpSections(), $("#rp-sync").checked);
+    if (!started || started.ok !== true) throw new Error(started && started.error || "启动失败");
+
+    const st = await pollTask(started.task_id, (s) => {
+      if (s.progress) $("#rp-status").textContent = s.progress;
+    });
+    reportTask = null;
+    $("#rp-progress-wrap").style.display = "none";
+    $("#rp-generate").disabled = false;
+
+    if (st.state === "done" && st.result && st.result.ok) {
+      lastReportPath = st.result.path;
+      rpBadge("已生成", "online");
+      $("#rp-open").disabled = false;
+      $("#rp-folder").disabled = false;
+      $("#rp-status").textContent =
+        `✓ 研报生成成功！单文件 ${st.result.size_kb} KB | 路径: ${st.result.path}`;
+      log(`研报生成完成: ${st.result.path}`, "ok");
+    } else {
+      const msg = (st.result && st.result.error) || st.error || "未知错误";
+      rpBadge("生成失败", "offline");
+      $("#rp-status").textContent = "生成失败: " + msg;
+      log("研报生成失败: " + msg, "err");
+    }
+  } catch (err) {
+    reportTask = null;
+    $("#rp-generate").disabled = false;
+    $("#rp-progress-wrap").style.display = "none";
+    rpBadge("生成失败", "offline");
+    $("#rp-status").textContent = "生成失败: " + err;
+  }
+}
+
+async function startBundle(fmt) {
+  const bridge = api();
+  if (!bridge) return;
+  const bvid = $("#rp-bvid").value.trim();
+  if (!bvid) { $("#rp-status").textContent = "请输入要打包导出的视频 BV 号"; return; }
+  const ext = fmt === "sqlite" ? ".sqlite" : ".xlsx";
+  const path = bvid + "_bundle" + ext;  // 相对路径，后端解析到工作目录
+
+  rpBadge("导出中", "checking");
+  $("#rp-status").textContent = `正在打包 ${bvid} 全部数据到 ${fmt.toUpperCase()} …`;
+  $("#rp-progress-wrap").style.display = "block";
+  $("#rp-progress").className = "progress-bar indeterminate";
+  try {
+    const started = await bridge.start_export(bvid, path, fmt);
+    if (!started || started.ok !== true) throw new Error(started && started.error || "启动失败");
+    const st = await pollTask(started.task_id, (s) => {
+      if (s.progress) $("#rp-status").textContent = s.progress;
+    });
+    $("#rp-progress-wrap").style.display = "none";
+    if (st.state === "done" && st.result && st.result.ok) {
+      rpBadge("导出完成", "online");
+      $("#rp-status").textContent =
+        `✓ 已成功打包 ${fmt.toUpperCase()}: ${st.result.path}（${st.result.total_records.toLocaleString()} 条记录）`;
+    } else {
+      const msg = (st.result && st.result.error) || st.error || "未知错误";
+      rpBadge("导出失败", "offline");
+      $("#rp-status").textContent = "导出失败: " + msg;
+    }
+  } catch (err) {
+    $("#rp-progress-wrap").style.display = "none";
+    rpBadge("导出失败", "offline");
+    $("#rp-status").textContent = "导出失败: " + err;
+  }
+}
+
+$("#rp-generate").addEventListener("click", startReport);
+$("#rp-sqlite").addEventListener("click", () => startBundle("sqlite"));
+$("#rp-excel").addEventListener("click", () => startBundle("xlsx"));
+$("#rp-all").addEventListener("click", () =>
+  $$("#rp-sections input[data-sec]").forEach((el) => { el.checked = true; }));
+$("#rp-none").addEventListener("click", () =>
+  $$("#rp-sections input[data-sec]").forEach((el) => { el.checked = false; }));
+$("#rp-open").addEventListener("click", () => {
+  if (!lastReportPath) return;
+  // WebView2 内直接打开本地研报文件
+  window.open("file:///" + lastReportPath.replace(/\\/g, "/"), "_blank");
+});
+
 /* ── 启动 ── */
 window.addEventListener("pywebviewready", () => {
   log("WebView2 引擎就绪 (GPU 渲染)", "ok");

@@ -104,11 +104,65 @@
       </section>
 
       <section class="page" data-page="report">
-        <header class="page-head"><h1>研报生成</h1><p class="hint">单文件离线 HTML 研报（迁移中）</p></header>
-        <div class="card placeholder-card">
-          <div class="placeholder-icon">🚧</div>
-          <div class="placeholder-title">此页面迁移中</div>
-          <div class="placeholder-sub">暂用 python main.py report --bvid BVxx 命令行生成。</div>
+        <header class="page-head">
+          <h1>可视化网页研报引擎</h1>
+          <p class="hint">生成零外部依赖、自包含 SVG 的单文件 HTML 研报，双击即开，支持按需选择板块</p>
+        </header>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">研报对象与数据范围</div>
+            <div class="card-sub">输入视频 BV 号，配置样本上限与输出文件名</div></div></div>
+          <div class="form-row">
+            <label>视频 BV 号</label>
+            <input id="rp-bvid" class="form-input" type="text" placeholder="BV1tJ4m1T7QL" />
+            <label>分析上限(0=全量)</label>
+            <input id="rp-limit" class="form-input form-num" type="number" value="0" min="0" />
+          </div>
+          <div class="form-row">
+            <label>输出文件名</label>
+            <input id="rp-out" class="form-input form-wide" type="text" placeholder="留空自动命名 report_<BV>.html" />
+          </div>
+          <label class="check-row">
+            <input id="rp-sync" type="checkbox" checked />
+            <span>生成前自动联网增量补采最新数据（拉取最新评论/弹幕与官方指标）</span>
+          </label>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">选择性研报内容板块</div>
+            <div class="card-sub">自由组合分析维度，不勾选的板块不占用篇幅与算力</div></div></div>
+          <div class="sec-grid" id="rp-sections">
+            <label class="check-row"><input type="checkbox" data-sec="overview" checked /><span>01 / 核心资产与指标总览</span></label>
+            <label class="check-row"><input type="checkbox" data-sec="trends" checked /><span>02 / 互动传播与时间节律</span></label>
+            <label class="check-row"><input type="checkbox" data-sec="sentiment" checked /><span>03 / 舆论倾向与情感基调</span></label>
+            <label class="check-row"><input type="checkbox" data-sec="terms" checked /><span>04 / 讨论热词与观众地域</span></label>
+            <label class="check-row"><input type="checkbox" data-sec="water_army" checked /><span>05 / 水军刷屏与控评名单</span></label>
+            <label class="check-row"><input type="checkbox" data-sec="top_comments" checked /><span>06 / 精选高赞热评矩阵</span></label>
+            <label class="check-row sec-full"><input type="checkbox" data-sec="interactive" checked /><span>07 / 互动发言检索透视（排序/搜索/筛选 + 时间滑块）</span></label>
+          </div>
+          <div class="form-row" style="margin-top:10px">
+            <button class="btn-ghost" id="rp-all">全部勾选</button>
+            <button class="btn-ghost" id="rp-none">全部取消</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div><div class="card-title">生成与交付控制</div>
+              <div class="card-sub">生成后可一键在浏览器打开，或直接分发 HTML 单文件</div></div>
+            <span class="badge" id="rp-badge">待命</span>
+          </div>
+          <div class="form-row">
+            <button class="btn-accent" id="rp-generate">一键生成独立研报</button>
+            <button class="btn-ghost" id="rp-open" disabled>在浏览器中查看</button>
+            <button class="btn-ghost" id="rp-folder" disabled>打开所在文件夹</button>
+            <button class="btn-ghost" id="rp-sqlite">打包为 SQLite</button>
+            <button class="btn-ghost" id="rp-excel">打包为 Excel</button>
+          </div>
+          <div class="progress-track" id="rp-progress-wrap" style="display:none">
+            <div class="progress-bar" id="rp-progress"></div>
+          </div>
+          <div class="status-line" id="rp-status">提示：输入 BV 号并选好板块后，点击「一键生成独立研报」即可开始装配。</div>
         </div>
       </section>
     </main>

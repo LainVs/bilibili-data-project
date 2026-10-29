@@ -105,3 +105,62 @@ def run_search(keyword: str, kind: str = "comments", limit: int = 100,
     return {"ok": True, "rows": clean,
             "total": res.get("total", len(clean)),
             "failed": res.get("failed") or []}
+
+
+def generate_report_task(bvid: str, out_name: str = "", limit: int = 0,
+                         sections: dict | None = None,
+                         auto_sync: bool = True,
+                         progress_cb=None) -> dict:
+    """生成单文件离线 HTML 研报（与 report_panel 同一引擎）。"""
+    import os
+
+    from reporting import ReportSections, generate_report
+
+    bvid = (bvid or "").strip()
+    if not bvid:
+        return {"ok": False, "error": "请输入要生成研报的视频 BV 号"}
+
+    try:
+        limit = max(0, int(limit or 0))
+    except (TypeError, ValueError):
+        limit = 0
+
+    out_name = (out_name or "").strip() or f"report_{bvid}.html"
+    if not out_name.endswith(".html"):
+        out_name += ".html"
+    if not os.path.isabs(out_name):
+        out_name = os.path.abspath(os.path.join("logs", out_name))
+
+    s = sections or {}
+    sec = ReportSections(
+        overview=bool(s.get("overview", True)),
+        trends=bool(s.get("trends", True)),
+        sentiment=bool(s.get("sentiment", True)),
+        terms=bool(s.get("terms", True)),
+        water_army=bool(s.get("water_army", True)),
+        top_comments=bool(s.get("top_comments", True)),
+        interactive_table=bool(s.get("interactive", True)),
+    )
+
+    if progress_cb:
+        try:
+            progress_cb(f"正在处理 {bvid} ...")
+        except Exception:
+            pass
+
+    path = generate_report(bvid, out_name, limit=limit, sections=sec,
+                           auto_sync=auto_sync)
+    size_kb = os.path.getsize(path) / 1024 if os.path.exists(path) else 0
+    return {"ok": True, "path": path, "size_kb": round(size_kb, 1)}
+
+
+def export_bundle_task(bvid: str, path: str, fmt: str = "sqlite") -> dict:
+    """打包视频全量数据为 SQLite / XLSX（与 report_panel 同一引擎）。"""
+    import etl
+
+    bvid = (bvid or "").strip()
+    if not bvid:
+        return {"ok": False, "error": "请输入要打包导出的视频 BV 号"}
+    res = etl.export_video_bundle(bvid, path, format=fmt, limit=0)
+    return {"ok": True, "path": res["path"],
+            "total_records": res.get("total_records", 0)}
