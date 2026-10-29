@@ -57,12 +57,69 @@
       <section class="page" data-page="collect">
         <header class="page-head">
           <h1>定向采集</h1>
-          <p class="hint">输入 BV / UID / 收藏夹，实时流式采集弹幕与评论（此页由 Tk 版逐步迁移）</p>
+          <p class="hint">输入 BV / UID / 帖子链接，实时流式采集弹幕与评论</p>
         </header>
-        <div class="card placeholder-card">
-          <div class="placeholder-icon">🚧</div>
-          <div class="placeholder-title">此页面迁移中</div>
-          <div class="placeholder-sub">采集页交互复杂（实时流/批量/多模式），将在连接页试点验证后迁移。<br>当前可切换到旧版引擎：python main.py gui --engine tk</div>
+
+        <div class="card">
+          <div class="form-row">
+            <div class="pill-tabs" id="cl-modes">
+              <button class="pill active" data-mode="video">视频</button>
+              <button class="pill" data-mode="up">UP主</button>
+              <button class="pill" data-mode="fav">收藏夹</button>
+              <button class="pill" data-mode="rel">关注/粉丝</button>
+              <button class="pill" data-mode="post">帖子/专栏</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label id="cl-target-label">视频 BV / 链接</label>
+            <input id="cl-target" class="form-input form-wide" type="text"
+                   placeholder="BV1xx4y1z7Ab 或 https://b23.tv/xxxx" />
+            <button class="btn-accent" id="cl-start">开始采集</button>
+            <button class="btn-ghost" id="cl-stop" disabled>停止</button>
+          </div>
+          <div class="form-row">
+            <label class="check-row"><input id="cl-comments" type="checkbox" checked /><span>评论</span></label>
+            <label class="check-row"><input id="cl-danmaku" type="checkbox" /><span>弹幕</span></label>
+            <label class="check-row"><input id="cl-incremental" type="checkbox" checked /><span>增量(去重)</span></label>
+            <span class="spacer"></span>
+            <span class="badge" id="cl-badge">待命</span>
+          </div>
+        </div>
+
+        <div class="collect-split">
+          <div class="card collect-left">
+            <div class="card-head"><div><div class="card-title">已采集统计</div>
+              <div class="card-sub" id="cl-total">加载中…</div></div></div>
+            <div class="form-row">
+              <input id="cl-uid-filter" class="form-input" type="text" placeholder="UID 筛选" />
+              <button class="btn-ghost" id="cl-filter">筛选</button>
+              <button class="btn-ghost" id="cl-filter-clear">清除</button>
+            </div>
+            <div class="mini-table-wrap">
+              <table class="result-table" id="cl-up-table">
+                <thead><tr><th>UP (UID)</th><th>视频</th><th>已采</th><th>评论</th></tr></thead>
+                <tbody id="cl-up-body"></tbody>
+              </table>
+            </div>
+            <div class="form-row" style="margin-top:10px">
+              <select id="cl-videos" class="search-kind form-wide"></select>
+              <button class="btn-ghost" id="cl-view-stored">查看库内内容</button>
+            </div>
+          </div>
+
+          <div class="card collect-right">
+            <div class="card-head">
+              <div><div class="card-title">实时抓取内容</div>
+                <div class="card-sub" id="cl-stream-status">等待开始…</div></div>
+              <div class="stream-stats">
+                <span>评论 <b id="cl-cnt-cmt">0</b></span>
+                <span>弹幕 <b id="cl-cnt-dmk">0</b></span>
+              </div>
+            </div>
+            <div class="stream-box" id="cl-stream">
+              <div class="stream-empty">实时内容将在此流式显示</div>
+            </div>
+          </div>
         </div>
       </section>
 

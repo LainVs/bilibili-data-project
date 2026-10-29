@@ -164,3 +164,115 @@ def export_bundle_task(bvid: str, path: str, fmt: str = "sqlite") -> dict:
     res = etl.export_video_bundle(bvid, path, format=fmt, limit=0)
     return {"ok": True, "path": res["path"],
             "total_records": res.get("total_records", 0)}
+
+
+def load_video_options(limit: int = 500) -> dict:
+    """已采集视频下拉选项（复用 gui.util.load_videos 与 video_summary）。"""
+    from gui.util import load_videos, video_summary
+
+    try:
+        videos = load_videos()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "items": []}
+
+    items = []
+    for v in videos[:limit]:
+        items.append({
+            "bvid": v.get("bvid", ""),
+            "label": video_summary(v),
+            "comment_count": v.get("comment_count", 0),
+            "danmaku_count": v.get("danmaku_count", 0),
+        })
+    return {"ok": True, "items": items, "total": len(videos)}
+
+
+def load_up_stats(uid_filter: str = "") -> dict:
+    """UP 主采集统计表（复用 dao.query_up_stats）。"""
+    from storage import dao
+
+    try:
+        rows = dao.query_up_stats()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "rows": []}
+
+    uid_filter = (uid_filter or "").strip()
+    out = []
+    for r in rows:
+        mid = str(r.get("mid", ""))
+        if uid_filter and uid_filter not in mid and uid_filter not in str(r.get("uname") or ""):
+            continue
+        out.append({
+            "uid": f"{mid}({r.get('uname') or ''})" if r.get("uname") else mid,
+            "total": r.get("video_total", 0),
+            "fetched": f"{r.get('video_fetched', 0)}/{r.get('video_total', 0)}",
+            "comment_total": r.get("comment_total", 0),
+        })
+    return {"ok": True, "rows": out}
+
+
+def load_stored_content(bvid: str, limit: int = 200) -> dict:
+    """查看库内已存的该视频评论/弹幕（复用 dao 查询）。"""
+    from storage import dao
+
+    bvid = (bvid or "").strip()
+    if not bvid:
+        return {"ok": False, "error": "请输入 BV 号"}
+
+    def _fmt(rows: list) -> list:
+        out = []
+        for r in rows:
+            item = {}
+            for k, v in r.items():
+                if hasattr(v, "strftime"):
+                    item[k] = v.strftime("%Y-%m-%d %H:%M")
+                elif isinstance(v, (bytes, bytearray)):
+                    item[k] = v.decode("utf-8", "ignore")
+                else:
+                    item[k] = v
+            out.append(item)
+        return out
+
+    try:
+        meta = dao.find_video_by_bvid(bvid)
+        aid = int((meta or {}).get("aid") or 0)
+    except Exception:
+        aid = 0
+    if not aid:
+        return {"ok": False, "error": f"库内未找到视频 {bvid}，请先采集"}
+
+    try:
+        comments = dao.query_comments_by_video(aid, limit=limit)
+    except Exception:
+        comments = []
+    try:
+        danmaku = dao.query_danmaku_by_video(aid, limit=limit)
+    except Exception:
+        danmaku = []
+    return {"ok": True, "comments": _fmt(comments), "danmaku": _fmt(danmaku),
+            "title": (meta or {}).get("title", "")}
+
+
+def extract_target_bvid(text: str) -> dict:
+    """离线解析输入目标：BV 号或 b23.tv 短链（短链需前端二次调用解析）。"""
+    from gui.util import extract_bvid, find_short_link
+
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "请输入目标"}
+    bvid = extract_bvid(text)
+    if bvid:
+        return {"ok": True, "bvid": bvid, "kind": "bvid"}
+    link = find_short_link(text)
+    if link:
+        return {"ok": True, "kind": "shortlink", "link": link}
+    return {"ok": False, "error": "无法识别 BV 号（示例：BV1xx4y1z7Ab）"}
+
+
+def resolve_shortlink(url: str) -> dict:
+    """联网解析 b23.tv 短链（可能耗时数秒，需在前端 await 中调用）。"""
+    from gui.util import resolve_short_link
+
+    bvid = resolve_short_link(url)
+    if bvid:
+        return {"ok": True, "bvid": bvid}
+    return {"ok": False, "error": "短链解析失败，请改用完整 BV 号"}

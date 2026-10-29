@@ -66,6 +66,114 @@ class _TaskRegistry:
 _TASKS = _TaskRegistry()
 
 
+class _CollectRunner:
+    """采集任务运行器：把 worker 的消息队列批量推送给前端。
+
+    WebView2 相对 Tk 的核心优势在这里体现：前端用 DocumentFragment
+    批量上屏 + 上限截断，几万条弹幕也能流畅滚动；Tk 版受限于 Text
+    控件每帧全量重排，只能丢弃预览帧。
+
+    推送策略：120ms 一批，每批最多 60 条（与 Tk 版预算对齐），
+    超出部分只更新计数不渲染，数据仍完整写入数据库。
+    """
+
+    BATCH_MS = 120
+    BATCH_MAX = 60
+
+    def __init__(self, window, msg_q) -> None:
+        self.win = window
+        self.q = msg_q
+        self.running = False
+        self.stats = {"comments": 0, "danmaku": 0}
+        self.worker = None
+        self._job = None
+
+    def start(self, worker) -> None:
+        self.worker = worker
+        self.running = True
+        worker.start()
+        self._tick()
+
+    def stop(self) -> None:
+        self.running = False
+        if self.worker is not None and hasattr(self.worker, "stop"):
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
+
+    def _push(self, payload: dict) -> None:
+        """把一批消息推给前端（JSON 序列化由 pywebview 处理）。"""
+        try:
+            import json
+
+            self.win.evaluate_js(
+                f"window.onCollectBatch({json.dumps(payload, ensure_ascii=False)})")
+        except Exception:
+            pass
+
+    def _tick(self) -> None:
+        if not self.running:
+            return
+        import queue as _q
+
+        items: list[dict] = []
+        events: list[dict] = []
+        dropped = 0
+        for _ in range(800):
+            try:
+                msg = self.q.get_nowait()
+            except _q.Empty:
+                break
+            mtype = msg.get("type")
+            if mtype == "item":
+                kind = msg.get("kind", "comment")
+                self.stats[kind if kind in self.stats else "comments"] += 1
+                if len(items) < self.BATCH_MAX:
+                    items.append({"kind": kind, "data": msg.get("data") or {}})
+                else:
+                    dropped += 1
+            else:
+                events.append(msg)
+
+        if items or events or dropped:
+            self._push({"items": items, "events": events,
+                        "dropped": dropped, "stats": dict(self.stats)})
+
+        alive = self.worker is not None and self.worker.is_alive()
+        if not alive:
+            # 收尾：再清一次队列，确保最后的消息不丢
+            tail_items, tail_events = [], []
+            for _ in range(2000):
+                try:
+                    msg = self.q.get_nowait()
+                except _q.Empty:
+                    break
+                if msg.get("type") == "item":
+                    tail_items.append({"kind": msg.get("kind", "comment"),
+                                       "data": msg.get("data") or {}})
+                else:
+                    tail_events.append(msg)
+            if tail_items or tail_events:
+                self._push({"items": tail_items[:200], "events": tail_events,
+                            "dropped": max(0, len(tail_items) - 200),
+                            "stats": dict(self.stats)})
+            self.running = False
+            self.worker = None
+            self._push({"items": [], "events": [{"type": "runner_done"}],
+                        "dropped": 0, "stats": dict(self.stats)})
+            return
+
+        import threading
+
+        self._job = threading.Timer(self.BATCH_MS / 1000.0, self._tick)
+        self._job.daemon = True
+        self._job.start()
+
+
+_RUNNERS: dict[str, _CollectRunner] = {}
+
+
 class JsApi:
     """暴露给前端 JS 的后端桥。方法名即 window.pywebview.api.<name>。
 
@@ -73,6 +181,9 @@ class JsApi:
     （错误用 {"ok": False, "error": "..."} 表达），前端永远拿得到响应。
     长任务走 task_id + 轮询，避免单次调用阻塞过久。
     """
+
+    def __init__(self) -> None:
+        self._win = None  # 由 run() 注入，供实时推送使用
 
     # ── 连接状态页 ──
     def get_db_status(self) -> dict:
@@ -160,6 +271,98 @@ class JsApi:
         """轮询长任务状态：running / done / failed / unknown。"""
         return _TASKS.get(task_id)
 
+    # ── 采集页 ──
+    def start_collect(self, target: str, mode: str = "video",
+                      comments: bool = True, danmaku: bool = False) -> dict:
+        """启动采集任务，消息通过 window.onCollectBatch 实时推送。"""
+        import queue as _q
+
+        try:
+            from gui.crawl_worker import CrawlWorker, PostCrawlWorker
+            from gui.web_bridge import extract_target_bvid
+
+            target = (target or "").strip()
+            if not target:
+                return {"ok": False, "error": "请输入目标"}
+            if not comments and not danmaku and mode != "post":
+                return {"ok": False, "error": "请至少勾选评论或弹幕"}
+            if self._win is None:
+                return {"ok": False, "error": "窗口未就绪"}
+
+            existing = _RUNNERS.get("current")
+            if existing is not None and existing.running:
+                return {"ok": False, "error": "已有采集任务在运行，请先停止"}
+
+            if mode == "post":
+                q = _q.Queue()
+                worker = PostCrawlWorker(q, target=target,
+                                         comments=comments, incremental=True)
+            else:
+                parsed = extract_target_bvid(target)
+                if not parsed.get("ok"):
+                    return {"ok": False, "error": parsed.get("error", "无法识别 BV 号")}
+                if parsed.get("kind") == "shortlink":
+                    return {"ok": False, "need_resolve": True,
+                            "link": parsed["link"],
+                            "error": "需要先解析短链"}
+                bvid = parsed["bvid"]
+                q = _q.Queue()
+                worker = CrawlWorker(q, bvid=bvid,
+                                     comments=comments, danmaku=danmaku)
+
+            runner = _CollectRunner(self._win, q)
+            _RUNNERS["current"] = runner
+            runner.start(worker)
+            return {"ok": True, "runner": "current",
+                    "target": target, "mode": mode}
+        except Exception as exc:
+            logger.exception("start_collect failed")
+            return {"ok": False, "error": str(exc)}
+
+    def stop_collect(self) -> dict:
+        """停止当前采集任务（软停止：已采数据仍会落库）。"""
+        runner = _RUNNERS.get("current")
+        if runner is None or not runner.running:
+            return {"ok": False, "error": "当前没有运行中的任务"}
+        runner.stop()
+        return {"ok": True}
+
+    def resolve_link(self, link: str) -> dict:
+        """解析 b23.tv 短链（联网，前端 await）。"""
+        from gui.web_bridge import resolve_shortlink
+
+        try:
+            return resolve_shortlink(link)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_video_options(self) -> dict:
+        """已采集视频下拉列表。"""
+        from gui.web_bridge import load_video_options
+
+        try:
+            return load_video_options()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "items": []}
+
+    def get_up_stats(self, uid_filter: str = "") -> dict:
+        """UP 主采集统计表。"""
+        from gui.web_bridge import load_up_stats
+
+        try:
+            return load_up_stats(uid_filter)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "rows": []}
+
+    def get_stored_content(self, bvid: str, limit: int = 200) -> dict:
+        """查看库内已存的评论/弹幕。"""
+        from gui.web_bridge import load_stored_content
+
+        try:
+            return load_stored_content(bvid, limit)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     # ── 窗口控制 ──
     def minimize(self) -> None:
         try:
@@ -195,7 +398,7 @@ def run() -> int:
         raise SystemExit(f"前端资源缺失: {index}")
 
     api = JsApi()
-    webview.create_window(
+    window = webview.create_window(
         "B站弹幕/评论采集系统",
         str(index),
         js_api=api,
@@ -204,6 +407,7 @@ def run() -> int:
         min_size=(960, 640),
         background_color="#faf9f5",
     )
+    api._win = window  # 实时推送需要窗口句柄
     # WebView2 (Edge/Chromium) 后端：GPU 合成 + 惯性滚动
     webview.start(gui="edgechromium" if _has_edge() else None, debug=False)
     return 0

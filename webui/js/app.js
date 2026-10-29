@@ -20,6 +20,7 @@ function showPage(name) {
   if (name === "connection") refreshConnection();
   if (name === "stats") refreshStats();
   if (name === "search") setTimeout(() => $("#search-input").focus(), 50);
+  if (name === "collect") { loadUpStats(); loadVideoOptions(); }
 }
 
 $("#nav").addEventListener("click", (e) => {
@@ -359,6 +360,265 @@ $("#rp-open").addEventListener("click", () => {
   if (!lastReportPath) return;
   // WebView2 内直接打开本地研报文件
   window.open("file:///" + lastReportPath.replace(/\\/g, "/"), "_blank");
+});
+
+/* ═══════════ 采集页 ═══════════ */
+let clMode = "video";
+let clRunning = false;
+let clCounts = { comments: 0, danmaku: 0 };
+const STREAM_MAX = 1500;   // 与 Tk 版对齐：超过截掉头部，防长列表拖慢滚动
+
+const MODE_LABELS = {
+  video: "视频 BV / 链接", up: "UP主 UID", fav: "收藏夹用户 UID",
+  rel: "关系用户 UID", post: "帖子链接 / ID",
+};
+
+$("#cl-modes").addEventListener("click", (e) => {
+  const btn = e.target.closest(".pill");
+  if (!btn) return;
+  $$("#cl-modes .pill").forEach((p) => p.classList.toggle("active", p === btn));
+  clMode = btn.dataset.mode;
+  $("#cl-target-label").textContent = MODE_LABELS[clMode] || "目标";
+  $("#cl-target").placeholder = clMode === "video"
+    ? "BV1xx4y1z7Ab 或 https://b23.tv/xxxx"
+    : (clMode === "post" ? "https://www.bilibili.com/read/cv123456" : "输入数字 UID");
+});
+
+function clBadge(text, cls) {
+  const b = $("#cl-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function fmtStreamLine(item) {
+  const d = item.data || {};
+  const kind = item.kind === "danmaku" ? "dmk" : "cmt";
+  const tag = kind === "dmk" ? "弹幕" : "评论";
+  const time = d.ctime || "";
+  let meta = "";
+  if (kind === "dmk") {
+    const prog = d.progress != null ? `${Number(d.progress).toFixed(1)}s` : "-";
+    const who = d.mid_hash ? `#${d.mid_hash}` : (d.uid || "-");
+    meta = `进度 ${prog} · ${who}`;
+  } else {
+    const who = d.uid ? `uid ${d.uid}` : "-";
+    const loc = d.ip_location ? ` · ${d.ip_location}` : "";
+    meta = `赞 ${d.like_num ?? 0} · ${who}${loc}`;
+  }
+  return { tag, kind, time, meta, content: String(d.content || "").slice(0, 300) };
+}
+
+/* 后端批量推送入口（由 _CollectRunner.evaluate_js 调用） */
+window.onCollectBatch = function (payload) {
+  const box = $("#cl-stream");
+  if (!payload) return;
+
+  // 1. 流式内容：DocumentFragment 一次性上屏（关键性能点）
+  const items = payload.items || [];
+  if (items.length) {
+    const empty = box.querySelector(".stream-empty");
+    if (empty) empty.remove();
+    const frag = document.createDocumentFragment();
+    for (const it of items) {
+      const L = fmtStreamLine(it);
+      const div = document.createElement("div");
+      div.className = "stream-line";
+      const spanTag = document.createElement("span");
+      spanTag.className = "k-" + L.kind;
+      spanTag.textContent = `[${L.tag}]`;
+      const spanTime = document.createElement("span");
+      spanTime.className = "t";
+      spanTime.textContent = ` ${L.time}`;
+      const spanMeta = document.createElement("span");
+      spanMeta.className = "meta";
+      spanMeta.textContent = ` ${L.meta} | `;
+      div.append(spanTag, spanTime, spanMeta, document.createTextNode(L.content));
+      frag.appendChild(div);
+    }
+    box.appendChild(frag);
+    // 上限截断：移除头部多余节点，保持 DOM 轻量
+    const overflow = box.children.length - STREAM_MAX;
+    if (overflow > 0) {
+      for (let i = 0; i < overflow; i++) box.removeChild(box.firstElementChild);
+    }
+    // 贴底跟随（用户上翻后不强制跳）
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  // 2. 计数更新
+  if (payload.stats) {
+    clCounts = payload.stats;
+    $("#cl-cnt-cmt").textContent = (clCounts.comments || 0).toLocaleString();
+    $("#cl-cnt-dmk").textContent = (clCounts.danmaku || 0).toLocaleString();
+  }
+
+  // 3. 事件消息（进度/元信息/错误/完成）
+  for (const ev of payload.events || []) {
+    handleCollectEvent(ev);
+  }
+};
+
+function handleCollectEvent(ev) {
+  const t = ev.type;
+  const status = $("#cl-stream-status");
+  if (t === "progress") {
+    if (ev.text) status.textContent = ev.text;
+  } else if (t === "meta") {
+    status.textContent = `采集中：${ev.bvid || ""} ${ev.title || ""}`.trim();
+  } else if (t === "error") {
+    appendStreamLine("err", "✗ " + (ev.text || "采集失败"));
+    status.textContent = "采集失败";
+  } else if (t === "done") {
+    const s = (ev.stats || {});
+    appendStreamLine("ok",
+      `✓ 采集完成：评论 ${s.comments || 0} 条，弹幕 ${s.danmaku || 0} 条`);
+    clBadge("已完成", "online");
+    setClRunning(false);
+  } else if (t === "runner_done") {
+    setClRunning(false);
+  }
+}
+
+function appendStreamLine(cls, text) {
+  const box = $("#cl-stream");
+  const empty = box.querySelector(".stream-empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "stream-line " + cls;
+  div.textContent = text;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setClRunning(on) {
+  clRunning = on;
+  $("#cl-start").disabled = on;
+  $("#cl-stop").disabled = !on;
+  $("#cl-start").textContent = on ? "采集中…" : "开始采集";
+}
+
+async function startCollect() {
+  const bridge = api();
+  if (!bridge || clRunning) return;
+  const target = $("#cl-target").value.trim();
+  if (!target) { $("#cl-stream-status").textContent = "请输入目标"; return; }
+
+  $("#cl-stream").innerHTML = '<div class="stream-empty">正在启动…</div>';
+  clCounts = { comments: 0, danmaku: 0 };
+  $("#cl-cnt-cmt").textContent = "0";
+  $("#cl-cnt-dmk").textContent = "0";
+  clBadge("采集中", "checking");
+  setClRunning(true);
+
+  try {
+    let res = await bridge.start_collect(
+      target, clMode, $("#cl-comments").checked, $("#cl-danmaku").checked);
+
+    // 短链需要先解析
+    if (res && res.need_resolve) {
+      $("#cl-stream-status").textContent = "正在解析短链…";
+      const r2 = await bridge.resolve_link(res.link);
+      if (!r2 || !r2.ok) throw new Error((r2 && r2.error) || "短链解析失败");
+      res = await bridge.start_collect(
+        r2.bvid, clMode, $("#cl-comments").checked, $("#cl-danmaku").checked);
+    }
+
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+    $("#cl-stream-status").textContent = `采集中：${res.target || target}`;
+  } catch (err) {
+    clBadge("失败", "offline");
+    $("#cl-stream-status").textContent = "启动失败: " + err;
+    appendStreamLine("err", "✗ " + err);
+    setClRunning(false);
+  }
+}
+
+async function stopCollect() {
+  const bridge = api();
+  if (!bridge) return;
+  $("#cl-stream-status").textContent = "正在停止…";
+  try {
+    await bridge.stop_collect();
+    appendStreamLine("progress", "已请求停止（已采数据仍会落库）");
+  } catch (e) {
+    $("#cl-stream-status").textContent = "停止失败: " + e;
+  }
+}
+
+$("#cl-start").addEventListener("click", startCollect);
+$("#cl-stop").addEventListener("click", stopCollect);
+$("#cl-target").addEventListener("keydown", (e) => { if (e.key === "Enter") startCollect(); });
+
+/* ── 已采集统计与视频列表 ── */
+async function loadUpStats(filter = "") {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_up_stats(filter);
+    const body = $("#cl-up-body");
+    body.innerHTML = "";
+    if (!res || !res.ok) return;
+    const frag = document.createDocumentFragment();
+    for (const r of res.rows || []) {
+      const tr = document.createElement("tr");
+      [r.uid, r.total, r.fetched, r.comment_total].forEach((v) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+  } catch (e) { /* 静默：统计表非关键路径 */ }
+}
+
+async function loadVideoOptions() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_video_options();
+    if (!res || !res.ok) return;
+    const sel = $("#cl-videos");
+    sel.innerHTML = "";
+    for (const it of res.items || []) {
+      const opt = document.createElement("option");
+      opt.value = it.bvid;
+      opt.textContent = it.label;
+      sel.appendChild(opt);
+    }
+    $("#cl-total").textContent = `共 ${res.total || 0} 个已采集视频`;
+  } catch (e) { /* 静默 */ }
+}
+
+$("#cl-filter").addEventListener("click", () => loadUpStats($("#cl-uid-filter").value.trim()));
+$("#cl-filter-clear").addEventListener("click", () => {
+  $("#cl-uid-filter").value = "";
+  loadUpStats();
+});
+
+$("#cl-view-stored").addEventListener("click", async () => {
+  const bridge = api();
+  const bvid = $("#cl-videos").value;
+  if (!bridge || !bvid) return;
+  $("#cl-stream-status").textContent = `正在读取 ${bvid} 库内数据…`;
+  try {
+    const res = await bridge.get_stored_content(bvid, 200);
+    if (!res || !res.ok) throw new Error((res && res.error) || "读取失败");
+    $("#cl-stream").innerHTML = "";
+    appendStreamLine("ok",
+      `==== ${bvid} ${res.title || ""} | 评论 ${res.comments.length} 条 / 弹幕 ${res.danmaku.length} 条 ====`);
+    for (const c of res.comments) {
+      appendStreamLine("", `[评论] ${c.ctime || ""} 赞${c.like_num ?? 0} uid${c.uid ?? "-"} | ${c.content || ""}`);
+    }
+    for (const d of res.danmaku) {
+      appendStreamLine("", `[弹幕] ${d.ctime || ""} ${Number(d.progress || 0).toFixed(1)}s | ${d.content || ""}`);
+    }
+    $("#cl-stream-status").textContent = `已显示 ${bvid} 的库内数据`;
+  } catch (err) {
+    appendStreamLine("err", "✗ " + err);
+    $("#cl-stream-status").textContent = "读取失败: " + err;
+  }
 });
 
 /* ── 启动 ── */
