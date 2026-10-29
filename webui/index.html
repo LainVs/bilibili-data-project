@@ -41,6 +41,10 @@
             </div>
             <div class="kv"><span class="k">实例地址</span><span class="v" id="d-addr">--</span></div>
             <div class="kv"><span class="k">连通状态</span><span class="v" id="d-msg">--</span></div>
+            <div class="form-row" style="margin-top:8px">
+              <button class="btn-ghost" data-svc="write" data-act="start">管理员重连 D</button>
+              <button class="btn-ghost" data-svc="write" data-act="stop">断开 D</button>
+            </div>
           </div>
           <div class="card" id="card-e">
             <div class="card-head">
@@ -49,10 +53,33 @@
             </div>
             <div class="kv"><span class="k">实例地址</span><span class="v" id="e-addr">--</span></div>
             <div class="kv"><span class="k">连通状态</span><span class="v" id="e-msg">--</span></div>
+            <div class="form-row" style="margin-top:8px">
+              <button class="btn-ghost" data-svc="read" data-act="start">管理员重连 E</button>
+              <button class="btn-ghost" data-svc="read" data-act="stop">断开 E</button>
+            </div>
           </div>
         </div>
+
         <div class="card">
-          <div class="card-head"><div><div class="card-title">执行与同步日志</div><div class="card-sub">实时输出底层跨库拷贝、校验与迁移信息</div></div></div>
+          <div class="card-head"><div><div class="card-title">数据归档与运维控制</div>
+            <div class="card-sub">手动触发分仓归档同步、进程清理与连接配置</div></div>
+            <span class="badge" id="arc-badge">待归档</span></div>
+          <div class="form-row">
+            <button class="btn-accent" id="arc-start">手动归档 D → E</button>
+            <button class="btn-ghost" id="arc-cancel" disabled>取消归档</button>
+            <button class="btn-ghost" id="arc-kill">清理卡死查询</button>
+            <button class="btn-ghost" id="arc-config">数据库连接配置</button>
+            <button class="btn-ghost" id="arc-refresh">刷新检测</button>
+          </div>
+          <div class="progress-track" id="arc-progress-wrap" style="display:none">
+            <div class="progress-bar" id="arc-progress"></div>
+          </div>
+          <div class="status-line" id="arc-tip">双库就绪，系统运行正常</div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">执行与同步日志</div>
+            <div class="card-sub">实时输出底层跨库拷贝、校验与迁移信息</div></div></div>
           <div class="console" id="console"><div class="console-line">就绪。等待操作…</div></div>
         </div>
       </section>
@@ -70,6 +97,7 @@
               <button class="pill" data-mode="up">UP主</button>
               <button class="pill" data-mode="fav">收藏夹</button>
               <button class="pill" data-mode="rel">关注/粉丝</button>
+              <button class="pill" data-mode="batch">批量UP</button>
               <button class="pill" data-mode="post">帖子/专栏</button>
             </div>
           </div>
@@ -86,6 +114,42 @@
             <label class="check-row"><input id="cl-incremental" type="checkbox" checked /><span>增量(去重)</span></label>
             <span class="spacer"></span>
             <span class="badge" id="cl-badge">待命</span>
+          </div>
+          <div class="form-row" id="cl-rel-row" style="display:none">
+            <label>关系方向</label>
+            <select id="cl-dir" class="search-kind">
+              <option value="both">关注+粉丝</option>
+              <option value="following">仅关注</option>
+              <option value="follower">仅粉丝</option>
+            </select>
+            <label>人数上限(0=不限)</label>
+            <input id="cl-max-users" class="form-input form-num" type="number" value="0" min="0" />
+          </div>
+          <div id="cl-batch-area" style="display:none;margin-top:8px">
+            <label class="card-sub">批量 UID（每行一个，可逗号/空格分隔）</label>
+            <textarea id="cl-batch-uids" class="form-input" rows="3"
+                      style="width:100%;resize:vertical;font-family:Consolas,monospace"
+                      placeholder="946974&#10;123456"></textarea>
+            <div class="form-row" style="margin-top:6px">
+              <label class="check-row"><input id="cl-ck-up" type="checkbox" checked /><span>UP视频</span></label>
+              <label class="check-row"><input id="cl-ck-fav" type="checkbox" /><span>收藏夹</span></label>
+              <label class="check-row"><input id="cl-ck-rel" type="checkbox" /><span>关注/粉丝</span></label>
+              <label>关系方向</label>
+              <select id="cl-rel-dir" class="search-kind">
+                <option value="both">关注+粉丝</option>
+                <option value="following">仅关注</option>
+                <option value="follower">仅粉丝</option>
+              </select>
+              <button class="btn-ghost" id="cl-batch-add" disabled>⊕ 追加(接续)</button>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:6px">
+            <div class="progress-track" style="flex:1;margin:0">
+              <div class="progress-bar" id="cl-progress"></div>
+            </div>
+            <span class="status-line" id="cl-doing">空闲</span>
+            <label class="check-row"><input id="cl-pause-stream" type="checkbox" /><span>暂停实时流</span></label>
+            <button class="btn-ghost" id="cl-clear">清空流</button>
           </div>
         </div>
 
@@ -129,10 +193,69 @@
       <section class="page" data-page="stats">
         <header class="page-head">
           <h1>统计洞察</h1>
-          <p class="hint">总览指标来自本地缓存，秒开；点刷新才触发全表聚合</p>
+          <p class="hint">总览指标来自本地缓存秒开；排行榜与洞察需全表聚合，点击后异步计算</p>
         </header>
-        <div class="stats-grid" id="stats-grid">
-          <div class="stat-card"><div class="stat-label">加载中…</div></div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">核心指标总览</div>
+            <div class="card-sub" id="st-updated">尚未加载</div></div>
+            <button class="btn-ghost" id="st-refresh">刷新总览</button></div>
+          <div class="stats-grid" id="stats-grid">
+            <div class="stat-card"><div class="stat-label">加载中…</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">排行榜</div>
+            <div class="card-sub" id="rk-status">点击「刷新排行榜」开始统计（大库可能数十秒）</div></div>
+            <div class="form-row" style="margin:0">
+              <label>Top</label>
+              <input id="rk-topn" class="form-input form-num" type="number" value="20" min="5" max="200" />
+              <button class="btn-accent" id="rk-refresh">刷新排行榜</button>
+            </div></div>
+          <div class="rank-grid" id="rank-grid">
+            <div class="empty-hint">尚未统计</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">互动趋势</div>
+            <div class="card-sub" id="tr-status">尚未加载</div></div>
+            <div class="form-row" style="margin:0">
+              <label>近 N 天</label>
+              <input id="tr-days" class="form-input form-num" type="number" value="30" min="1" max="365" />
+              <button class="btn-ghost" id="tr-refresh">加载趋势</button>
+            </div></div>
+          <div class="trend-wrap" id="trend-wrap">
+            <div class="empty-hint">点击「加载趋势」查看每日评论量与 24 小时分布</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">趋势洞察</div>
+            <div class="card-sub" id="ins-status">尚未计算</div></div>
+            <button class="btn-ghost" id="ins-refresh">计算洞察</button></div>
+          <div id="ins-body"><div class="empty-hint">点击「计算洞察」分析高频词与情感分布</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">水军 / 刷屏检测</div>
+            <div class="card-sub" id="dt-status">尚未检测</div></div></div>
+          <div class="form-row">
+            <label>BV 号</label>
+            <input id="dt-bvid" class="form-input form-wide" type="text" placeholder="留空=最新采样兜底" />
+            <label>分析上限</label>
+            <input id="dt-limit" class="form-input form-num" type="number" value="5000" min="100" />
+            <button class="btn-accent" id="dt-run">开始检测</button>
+          </div>
+          <div id="dt-summary" class="status-line" style="margin-bottom:8px"></div>
+          <div class="result-table-wrap" style="max-height:320px">
+            <table class="result-table">
+              <thead><tr><th>UID</th><th>昵称</th><th>发言</th><th>复读率</th>
+                <th>爆发</th><th>属地</th><th>评分</th><th>等级</th><th>命中</th></tr></thead>
+              <tbody id="dt-rows"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -142,8 +265,9 @@
           <p class="hint">跨仓检索评论/弹幕/视频 · 空格=同时包含 · OR=任一 · "引号"=精确短语</p>
         </header>
         <div class="search-bar">
-          <input id="search-input" class="search-input" type="text"
+          <input id="search-input" class="search-input" type="text" list="search-history"
                  placeholder="输入关键词，如：python OR 模型 &quot;神评&quot;" />
+          <datalist id="search-history"></datalist>
           <select id="search-kind" class="search-kind">
             <option value="comments">评论</option>
             <option value="danmaku">弹幕</option>
@@ -151,8 +275,21 @@
           </select>
           <button id="search-btn" class="btn-accent">搜索</button>
         </div>
+        <div class="search-adv">
+          <label>起 <input id="search-start" class="form-input" type="date" /></label>
+          <label>止 <input id="search-end" class="form-input" type="date" /></label>
+          <label>排除词 <input id="search-exclude" class="form-input" type="text" placeholder="逗号分隔" /></label>
+          <label>最低赞 <input id="search-minlike" class="form-input form-num" type="number" value="0" min="0" /></label>
+          <label>上限 <input id="search-limit" class="form-input form-num" type="number" value="100" min="1" /></label>
+          <span class="spacer"></span>
+          <div class="view-toggle" id="search-view">
+            <button class="pill active" data-view="table">表格</button>
+            <button class="pill" data-view="text">全文</button>
+          </div>
+          <button class="btn-ghost" id="search-export" disabled>导出CSV</button>
+        </div>
         <div class="search-status" id="search-status"></div>
-        <div class="result-table-wrap">
+        <div class="result-table-wrap" id="search-table-wrap">
           <table class="result-table" id="result-table">
             <thead id="result-head"></thead>
             <tbody id="result-body"></tbody>
@@ -160,6 +297,16 @@
           <div class="empty-hint" id="search-empty" style="display:none">
             暂无匹配内容 — 换关键词或时间范围再试
           </div>
+        </div>
+        <div class="search-text-wrap" id="search-text-wrap" style="display:none">
+          <div class="stream-box" id="search-text" style="height:calc(100vh - 320px)">
+            <div class="stream-empty">切换到全文视图后显示检索结果</div>
+          </div>
+        </div>
+        <div class="pager" id="search-pager" style="display:none">
+          <button class="btn-ghost" id="pg-prev">← 上一页</button>
+          <span class="status-line" id="pg-info">第 1/1 页</span>
+          <button class="btn-ghost" id="pg-next">下一页 →</button>
         </div>
       </section>
 
@@ -181,6 +328,7 @@
           <div class="form-row">
             <label>输出文件名</label>
             <input id="rp-out" class="form-input form-wide" type="text" placeholder="留空自动命名 report_<BV>.html" />
+            <button class="btn-ghost" id="rp-browse">浏览…</button>
           </div>
           <label class="check-row">
             <input id="rp-sync" type="checkbox" checked />
@@ -288,6 +436,7 @@
             <label>上限</label>
             <input id="uq-limit" class="form-input form-num" type="number" value="500" min="1" />
             <button class="btn-accent" id="uq-search">查询</button>
+            <button class="btn-ghost" id="uq-export" disabled>导出CSV</button>
             <span class="badge" id="uq-badge">待查询</span>
           </div>
         </div>

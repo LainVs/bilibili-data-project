@@ -276,6 +276,56 @@ html, body {
 }
 .param-grid .form-input { width: 100%; }
 
+/* ── 统计页扩展 ── */
+.rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.rank-block { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.rank-block h4 {
+  font-size: 12.5px; font-weight: 600; padding: 8px 12px;
+  background: var(--bg-muted); color: var(--fg-secondary);
+  display: flex; justify-content: space-between;
+}
+.rank-block .rank-body { max-height: 240px; overflow-y: auto; }
+.rank-block table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rank-block td { padding: 5px 10px; border-top: 1px solid #f0eee6; }
+.rank-block tr:nth-child(even) td { background: #fcfbfa; }
+.rank-block td.num { text-align: right; color: var(--accent); font-weight: 600; width: 70px; }
+
+.trend-wrap { display: grid; gap: 12px; }
+.bar-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; padding: 8px 0; }
+.bar-chart .bar {
+  flex: 1; min-width: 3px; background: var(--accent); border-radius: 2px 2px 0 0;
+  transition: opacity 0.15s ease; position: relative;
+}
+.bar-chart .bar:hover { opacity: 0.75; }
+.bar-labels { display: flex; gap: 3px; font-size: 10px; color: var(--fg-muted); }
+.bar-labels span { flex: 1; text-align: center; min-width: 3px; overflow: hidden; }
+
+.term-wall { display: flex; flex-wrap: wrap; gap: 6px; }
+.term-chip {
+  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  background: var(--accent-light); color: var(--accent);
+}
+.term-chip b { font-weight: 600; }
+.senti-row { display: flex; gap: 10px; margin: 10px 0; }
+.senti-item { flex: 1; text-align: center; padding: 10px; border-radius: 8px; }
+.senti-item .n { font-size: 18px; font-weight: 700; }
+.senti-item .l { font-size: 11px; color: var(--fg-muted); }
+.senti-pos { background: #edf7ed; } .senti-pos .n { color: #1f7a37; }
+.senti-neu { background: var(--bg-muted); } .senti-neu .n { color: var(--fg-secondary); }
+.senti-neg { background: #fdf0ef; } .senti-neg .n { color: #b9382f; }
+
+/* ── 搜索页扩展 ── */
+.search-adv {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px; font-size: 12px; color: var(--fg-muted);
+}
+.search-adv label { display: flex; align-items: center; gap: 5px; }
+.search-adv .form-input { padding: 5px 9px; font-size: 12px; }
+.view-toggle { display: flex; gap: 3px; background: var(--bg-muted); padding: 3px; border-radius: 8px; }
+.view-toggle .pill { padding: 4px 12px; font-size: 12px; }
+.pager { display: flex; align-items: center; gap: 12px; justify-content: center; padding: 10px 0; }
+.search-text-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
+
 /* ── 占位卡（迁移中的页面）── */
 .placeholder-card { text-align: center; padding: 48px 24px; }
 .placeholder-icon { font-size: 36px; }

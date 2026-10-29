@@ -19,7 +19,10 @@ function showPage(name) {
   // 切入页面才拉数据（一次性，不轮询）
   if (name === "connection") refreshConnection();
   if (name === "stats") refreshStats();
-  if (name === "search") setTimeout(() => $("#search-input").focus(), 50);
+  if (name === "search") {
+    setTimeout(() => $("#search-input").focus(), 50);
+    loadHistory();
+  }
   if (name === "collect") { loadUpStats(); loadVideoOptions(); }
   if (name === "update") loadUpdateVideos();
   if (name === "broad") { loadBroadUps(); loadDbSize(); }
@@ -77,40 +80,8 @@ async function refreshConnection() {
 }
 
 /* ── 统计页（读缓存，秒开）── */
-const STAT_LABELS = {
-  comments: ["总评论", "条"],
-  danmaku: ["总弹幕", "条"],
-  videos: ["视频数", "个"],
-  users: ["用户数", "人"],
-  crc_hits: ["UID 反查命中", "次"],
-};
-
 async function refreshStats() {
-  const bridge = api();
-  if (!bridge) return;
-  try {
-    const res = await bridge.get_overview();
-    const grid = $("#stats-grid");
-    grid.innerHTML = "";
-    const stats = res && res.stats;
-    if (!stats) {
-      grid.innerHTML = '<div class="stat-card"><div class="stat-label">暂无缓存统计</div>' +
-        '<div class="stat-sub">在 Tk 版「统计洞察」点一次刷新即可生成缓存</div></div>';
-      return;
-    }
-    for (const [key, [label, unit]] of Object.entries(STAT_LABELS)) {
-      if (!(key in stats)) continue;
-      const card = document.createElement("div");
-      card.className = "stat-card";
-      const v = Number(stats[key]) || 0;
-      card.innerHTML = `<div class="stat-label">${label}</div>` +
-        `<div class="stat-value">${v.toLocaleString()}</div>` +
-        `<div class="stat-sub">${unit}</div>`;
-      grid.appendChild(card);
-    }
-  } catch (err) {
-    log("统计读取失败: " + err, "err");
-  }
+  await loadStatsOverview(false);
 }
 
 /* ── 全局搜索页 ── */
@@ -167,6 +138,7 @@ async function doSearch() {
   const kw = $("#search-input").value.trim();
   if (!kw) { $("#search-status").textContent = "请输入关键词"; return; }
   const kind = $("#search-kind").value;
+  const limit = Math.max(1, Number($("#search-limit").value) || 100);
 
   searching = true;
   const btn = $("#search-btn");
@@ -178,14 +150,29 @@ async function doSearch() {
   const t0 = performance.now();
 
   try {
-    const res = await bridge.search(kw, kind, 100);
+    const res = await bridge.search(
+      kw, kind, limit,
+      $("#search-start").value || "",
+      $("#search-end").value || "",
+      $("#search-exclude").value.trim(),
+      Number($("#search-minlike").value) || 0);
     const ms = Math.round(performance.now() - t0);
     if (!res || res.ok !== true) throw new Error(res && res.error || "检索失败");
-    const rows = res.rows || [];
-    renderResults(kind, rows);
-    const failedNote = (res.failed && res.failed.length) ? `，${res.failed.length} 个仓不可达` : "";
+
+    lastSearchRows = res.rows || [];
+    lastSearchKind = kind;
+    searchPage = 0;
+    pushHistory(kw);
+    $("#search-export").disabled = !lastSearchRows.length;
+
+    renderResults(kind, pageRows());
+    if (searchView === "text") renderTextView(kind, pageRows());
+    updatePager();
+
+    const failedNote = (res.failed && res.failed.length)
+      ? `，${res.failed.length} 个仓不可达` : "";
     $("#search-status").textContent =
-      `共 ${rows.length} 条 · 耗时 ${ms}ms${failedNote}（缓存命中则近乎瞬时）`;
+      `共 ${lastSearchRows.length.toLocaleString()} 条 · 耗时 ${ms}ms${failedNote}（缓存命中则近乎瞬时）`;
   } catch (err) {
     $("#search-status").textContent = "检索失败: " + err;
     log("搜索失败: " + err, "err");
@@ -385,6 +372,19 @@ $("#cl-modes").addEventListener("click", (e) => {
   $("#cl-target").placeholder = clMode === "video"
     ? "BV1xx4y1z7Ab 或 https://b23.tv/xxxx"
     : (clMode === "post" ? "https://www.bilibili.com/read/cv123456" : "输入数字 UID");
+  // 关系模式显示方向/人数；批量模式显示多行 UID 区
+  $("#cl-rel-row").style.display = clMode === "rel" ? "flex" : "none";
+  $("#cl-batch-area").style.display = clMode === "batch" ? "block" : "none";
+  $("#cl-target").style.display = clMode === "batch" ? "none" : "block";
+  $("#cl-target-label").style.display = clMode === "batch" ? "none" : "block";
+});
+
+$("#cl-clear").addEventListener("click", () => {
+  if (!confirm("清空实时流显示？（已采数据不受影响）")) return;
+  $("#cl-stream").innerHTML = '<div class="stream-empty">实时内容将在此流式显示</div>';
+  clCounts = { comments: 0, danmaku: 0 };
+  $("#cl-cnt-cmt").textContent = "0";
+  $("#cl-cnt-dmk").textContent = "0";
 });
 
 function clBadge(text, cls) {
@@ -504,6 +504,12 @@ function setClRunning(on) {
 async function startCollect() {
   const bridge = api();
   if (!bridge || clRunning) return;
+
+  // 批量模式：走批量 UID 流程
+  if (clMode === "batch") {
+    return startBatch();
+  }
+
   const target = $("#cl-target").value.trim();
   if (!target) { $("#cl-stream-status").textContent = "请输入目标"; return; }
 
@@ -513,10 +519,13 @@ async function startCollect() {
   $("#cl-cnt-dmk").textContent = "0";
   clBadge("采集中", "checking");
   setClRunning(true);
+  $("#cl-progress").className = "progress-bar indeterminate";
 
   try {
     let res = await bridge.start_collect(
-      target, clMode, $("#cl-comments").checked, $("#cl-danmaku").checked);
+      target, clMode, $("#cl-comments").checked, $("#cl-danmaku").checked,
+      $("#cl-incremental").checked,
+      $("#cl-dir").value, Number($("#cl-max-users").value) || 0);
 
     // 短链需要先解析
     if (res && res.need_resolve) {
@@ -524,7 +533,8 @@ async function startCollect() {
       const r2 = await bridge.resolve_link(res.link);
       if (!r2 || !r2.ok) throw new Error((r2 && r2.error) || "短链解析失败");
       res = await bridge.start_collect(
-        r2.bvid, clMode, $("#cl-comments").checked, $("#cl-danmaku").checked);
+        r2.bvid, "video", $("#cl-comments").checked, $("#cl-danmaku").checked,
+        $("#cl-incremental").checked);
     }
 
     if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
@@ -534,8 +544,47 @@ async function startCollect() {
     $("#cl-stream-status").textContent = "启动失败: " + err;
     appendStreamLine("err", "✗ " + err);
     setClRunning(false);
+    $("#cl-progress").className = "progress-bar";
   }
 }
+
+/* 批量 UID 采集 */
+async function startBatch(append) {
+  const bridge = api();
+  if (!bridge) return;
+  const raw = $("#cl-batch-uids").value;
+  const uids = String(raw).split(/[,\s\n;；]+/).map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s)).map(Number);
+  if (!uids.length) {
+    $("#cl-stream-status").textContent = "请粘贴至少一个 UID";
+    return;
+  }
+  if (!append) {
+    $("#cl-stream").innerHTML = '<div class="stream-empty">正在启动批量…</div>';
+    clCounts = { comments: 0, danmaku: 0 };
+    $("#cl-cnt-cmt").textContent = "0";
+    $("#cl-cnt-dmk").textContent = "0";
+  }
+  clBadge(append ? "追加中" : "批量中", "checking");
+  setClRunning(true);
+  try {
+    const res = await bridge.start_batch(
+      uids,
+      $("#cl-comments").checked, $("#cl-danmaku").checked,
+      $("#cl-ck-up").checked, $("#cl-ck-fav").checked, $("#cl-ck-rel").checked,
+      $("#cl-rel-dir").value, append);
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+    $("#cl-stream-status").textContent =
+      `${append ? "已追加" : "批量启动"}：${uids.length} 个 UID`;
+    $("#cl-batch-add").disabled = false;
+  } catch (err) {
+    clBadge("失败", "offline");
+    $("#cl-stream-status").textContent = "批量启动失败: " + err;
+    setClRunning(false);
+  }
+}
+
+$("#cl-batch-add").addEventListener("click", () => startBatch(true));
 
 async function stopCollect() {
   const bridge = api();
@@ -758,6 +807,8 @@ $("#up-refresh").addEventListener("click", loadUpdateVideos);
 
 /* ═══════════ 用户查询页 ═══════════ */
 let uqBusy = false;
+let uqLastRows = [];
+let uqLastUid = 0;
 
 function uqBadge(text, cls) {
   const b = $("#uq-badge");
@@ -795,6 +846,9 @@ async function queryUser() {
 
     // 发言表
     const all = [...(res.comments || []), ...(res.danmaku || [])];
+    uqLastRows = all;
+    uqLastUid = res.uid;
+    $("#uq-export").disabled = !all.length;
     $("#uq-count").textContent =
       `评论 ${(res.comments || []).length} 条，弹幕 ${(res.danmaku || []).length} 条`;
     const body = $("#uq-rows");
@@ -831,6 +885,22 @@ async function queryUser() {
 
 $("#uq-search").addEventListener("click", queryUser);
 $("#uq-uid").addEventListener("keydown", (e) => { if (e.key === "Enter") queryUser(); });
+
+$("#uq-export").addEventListener("click", async () => {
+  const bridge = api();
+  if (!bridge || !uqLastRows.length) return;
+  uqBadge("导出中", "checking");
+  try {
+    const res = await bridge.export_user_rows(uqLastUid, uqLastRows);
+    if (!res || !res.ok) throw new Error((res && res.error) || "导出失败");
+    uqBadge("已导出", "online");
+    $("#uq-count").textContent =
+      `已导出 ${res.rows.toLocaleString()} 行 → ${res.path}`;
+  } catch (err) {
+    uqBadge("导出失败", "offline");
+    $("#uq-count").textContent = "导出失败: " + err;
+  }
+});
 
 /* ═══════════ 广泛采集页 ═══════════ */
 let brRunning = false;
@@ -1058,6 +1128,597 @@ $("#br-seed-hot").addEventListener("click", () => seedFrom("hot"));
 $("#br-clear").addEventListener("click", () => {
   $("#br-stream").innerHTML = '<div class="stream-empty">实时内容将在此显示</div>';
   $("#br-up-rows").innerHTML = "";
+});
+
+/* ═══════════ 连接页运维操作 ═══════════ */
+let arcRunning = false;
+
+function arcBadge(text, cls) {
+  const b = $("#arc-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function arcTip(text) { $("#arc-tip").textContent = text; }
+
+/* 归档进度推送入口 */
+window.onArchiveLog = function (ev) {
+  if (!ev) return;
+  const t = ev.type;
+  if (t === "precheck") {
+    const d = ev.data || {};
+    const c = d.counts || {};
+    log(`预检 D: 评论 ${(c.raw_comments || 0).toLocaleString()} / ` +
+        `弹幕 ${(c.raw_danmaku || 0).toLocaleString()} / ` +
+        `视频 ${(c.meta_video || 0).toLocaleString()} / ` +
+        `用户 ${(c.dim_user || 0).toLocaleString()}`);
+    if (d.count_err) log("预检：D 表统计失败 " + d.count_err, "err");
+    if (d.total_est < d.threshold) {
+      log(`预检提示: 当前 D 库评论 ${(d.total_est || 0).toLocaleString()} 行 ` +
+          `< 门槛 ${(d.threshold || 0).toLocaleString()} 行，若无断点将被拒绝`, "err");
+    }
+    $("#arc-progress-wrap").style.display = "block";
+    $("#arc-progress").className = "progress-bar indeterminate";
+  } else if (t === "log") {
+    const text = ev.text || "";
+    log(text);
+    arcTip(text);
+    // 解析清D百分比 [CLEARPCT nn]
+    const m = /\[CLEARPCT\s*(\d+)\]/.exec(text);
+    if (m) {
+      const pct = Math.max(0, Math.min(100, parseInt(m[1], 10)));
+      $("#arc-progress").className = "progress-bar";
+      $("#arc-progress").style.width = pct + "%";
+    }
+  } else if (t === "error") {
+    log("✗ " + (ev.text || "归档失败"), "err");
+    arcBadge("归档失败", "offline");
+    arcTip("归档失败: " + (ev.text || ""));
+    setArcRunning(false);
+  } else if (t === "finished") {
+    const r = ev.result || {};
+    if (r.ok) {
+      log(r.msg || "归档完成", "ok");
+      arcBadge("已归档", "online");
+      arcTip(r.msg || "归档完成");
+      $("#arc-progress").className = "progress-bar";
+      $("#arc-progress").style.width = "100%";
+    } else {
+      log(r.msg || r.error || "归档未完成", "err");
+      arcBadge("未完成", "offline");
+      arcTip(r.msg || r.error || "归档未完成");
+    }
+    setArcRunning(false);
+    refreshConnection();
+  } else if (t === "runner_done") {
+    setArcRunning(false);
+  }
+};
+
+function setArcRunning(on) {
+  arcRunning = on;
+  $("#arc-start").disabled = on;
+  $("#arc-cancel").disabled = !on;
+  $("#arc-start").textContent = on ? "归档中…" : "手动归档 D → E";
+  if (!on) {
+    setTimeout(() => {
+      $("#arc-progress-wrap").style.display = "none";
+      $("#arc-progress").style.width = "0%";
+    }, 1200);
+  }
+}
+
+async function startArchive() {
+  const bridge = api();
+  if (!bridge || arcRunning) return;
+  arcBadge("归档中", "checking");
+  arcTip("正在计算分仓行数与门槛…");
+  setArcRunning(true);
+  try {
+    const res = await bridge.start_archive();
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+  } catch (err) {
+    arcBadge("归档失败", "offline");
+    arcTip("启动失败: " + err);
+    log("✗ 归档启动失败: " + err, "err");
+    setArcRunning(false);
+  }
+}
+
+async function cancelArchive() {
+  const bridge = api();
+  if (!bridge) return;
+  arcTip("已请求取消归档…");
+  try {
+    await bridge.stop_archive();
+    log("已请求取消归档（逐批路径可随时中断）");
+  } catch (e) { /* 忽略 */ }
+}
+
+async function serviceAction(role, act) {
+  const bridge = api();
+  if (!bridge) return;
+  const name = role === "write" ? "D" : "E";
+  if (act === "stop" && !confirm(`确定断开 ${name} 库？\n\n采集/查询将暂停。`)) return;
+  arcTip(`正在申请管理员权限${act === "start" ? "启动" : "停止"} MySQL（${name}）…`);
+  try {
+    const res = act === "start"
+      ? await bridge.start_service(role)
+      : await bridge.stop_service(role);
+    if (res && res.ok) {
+      arcTip(res.msg || "已发起操作");
+      log(res.msg || "已发起操作", "ok");
+      setTimeout(refreshConnection, 3500);
+    } else {
+      arcTip((res && res.error) || "操作失败");
+      log("✗ " + ((res && res.error) || "操作失败"), "err");
+    }
+  } catch (e) {
+    arcTip("操作失败: " + e);
+  }
+}
+
+async function killStuck() {
+  const bridge = api();
+  if (!bridge) return;
+  arcTip("正在排查卡死查询…");
+  try {
+    const res = await bridge.kill_stuck();
+    if (res && res.ok) {
+      arcTip(res.msg);
+      log(res.msg, "ok");
+    } else {
+      arcTip((res && res.error) || "清理失败");
+      log("✗ " + ((res && res.error) || "清理失败"), "err");
+    }
+  } catch (e) {
+    arcTip("清理失败: " + e);
+  }
+}
+
+async function showDbConfig() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_db_config();
+    if (!res || !res.ok) throw new Error((res && res.error) || "读取失败");
+    const w = res.write, r = res.read;
+    alert(
+      `当前数据库连接配置\n\n` +
+      `【写库 D】\n${w.user}@${w.host}:${w.port}/${w.database}\n\n` +
+      `【归档库 E】\n${r.user}@${r.host}:${r.port}/${r.database}\n\n` +
+      `如需修改，请使用经典 Tk 引擎的「数据库连接配置」对话框：\n` +
+      `python main.py gui --engine tk`);
+  } catch (e) {
+    alert("读取配置失败: " + e);
+  }
+}
+
+document.querySelectorAll("[data-svc]").forEach((btn) => {
+  btn.addEventListener("click", () =>
+    serviceAction(btn.dataset.svc, btn.dataset.act));
+});
+$("#arc-start").addEventListener("click", startArchive);
+$("#arc-cancel").addEventListener("click", cancelArchive);
+$("#arc-kill").addEventListener("click", killStuck);
+$("#arc-config").addEventListener("click", showDbConfig);
+$("#arc-refresh").addEventListener("click", refreshConnection);
+
+/* ═══════════ 统计页扩展 ═══════════ */
+const STAT_LABELS_FULL = {
+  videos: ["视频数", "个"], comments: ["总评论", "条"],
+  danmaku: ["总弹幕", "条"], users: ["用户数", "人"],
+  video_with_comments: ["有评论视频", "个"], danmaku_parsed: ["弹幕已解析", "条"],
+  danmaku_unparsed: ["弹幕未解析", "条"], crc_hits: ["UID反查命中", "次"],
+  comment_uids: ["评论独立UID", "个"], crc_total: ["反查总量", "条"],
+};
+
+async function loadStatsOverview(refresh) {
+  const bridge = api();
+  if (!bridge) return;
+  const grid = $("#stats-grid");
+  if (refresh) {
+    grid.innerHTML = '<div class="stat-card"><div class="stat-label">全表聚合中…</div></div>';
+    $("#st-updated").textContent = "正在统计（大库可能较久）";
+  }
+  try {
+    const res = await bridge.get_stats_overview(!!refresh);
+    const stats = res && res.stats;
+    if (!stats) throw new Error((res && res.error) || "无数据");
+    grid.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    for (const [key, [label, unit]] of Object.entries(STAT_LABELS_FULL)) {
+      if (!(key in stats)) continue;
+      const card = document.createElement("div");
+      card.className = "stat-card";
+      const v = Number(stats[key]) || 0;
+      card.innerHTML = `<div class="stat-label">${label}</div>` +
+        `<div class="stat-value">${v.toLocaleString()}</div>` +
+        `<div class="stat-sub">${unit}</div>`;
+      frag.appendChild(card);
+    }
+    grid.appendChild(frag);
+    $("#st-updated").textContent = res.cached
+      ? "来自本地缓存（点刷新重新统计）" : "刚刚统计完成";
+  } catch (err) {
+    grid.innerHTML = `<div class="stat-card"><div class="stat-label">读取失败</div>` +
+      `<div class="stat-sub">${escapeHtml(String(err))}</div></div>`;
+  }
+}
+
+/* 排行榜：长任务轮询 */
+async function loadRankings() {
+  const bridge = api();
+  if (!bridge) return;
+  const topN = Math.max(5, Math.min(200, Number($("#rk-topn").value) || 20));
+  $("#rk-status").textContent = "正在统计排行榜（大库可能数十秒）…";
+  $("#rk-refresh").disabled = true;
+  try {
+    const started = await bridge.get_rankings(topN);
+    if (!started || !started.ok) throw new Error((started && started.error) || "启动失败");
+    const st = await pollTask(started.task_id, (s) => {
+      if (s.progress) $("#rk-status").textContent = s.progress;
+    });
+    if (st.state !== "done" || !st.result || !st.result.ok) {
+      throw new Error((st.result && st.result.error) || st.error || "统计失败");
+    }
+    renderRankings(st.result.rankings);
+    const total = Object.values(st.result.rankings || {})
+      .reduce((n, b) => n + (b.rows || []).length, 0);
+    $("#rk-status").textContent = `已统计 ${Object.keys(st.result.rankings || {}).length} 个榜单，共 ${total} 行`;
+  } catch (err) {
+    $("#rk-status").textContent = "统计失败: " + err;
+  } finally {
+    $("#rk-refresh").disabled = false;
+  }
+}
+
+function renderRankings(rankings) {
+  const grid = $("#rank-grid");
+  grid.innerHTML = "";
+  for (const [key, block] of Object.entries(rankings || {})) {
+    const wrap = document.createElement("div");
+    wrap.className = "rank-block";
+    const cols = block.columns || [];
+    const head = `<h4><span>${escapeHtml(block.title || key)}</span>` +
+      `<span>${(block.rows || []).length} 行</span></h4>`;
+    const rowsHtml = (block.rows || []).map((r) => {
+      const cells = cols.map((c, i) => {
+        const v = r[c.key];
+        const text = typeof v === "number" ? v.toLocaleString() : String(v ?? "");
+        return `<td class="${i > 0 ? "num" : ""}">${escapeHtml(text)}</td>`;
+      }).join("");
+      return `<tr>${cells}</tr>`;
+    }).join("");
+    const table = `<div class="rank-body"><table>` +
+      `<thead><tr>${cols.map((c, i) =>
+        `<th style="text-align:${i > 0 ? "right" : "left"}">${escapeHtml(c.label)}</th>`).join("")}</tr></thead>` +
+      `<tbody>${rowsHtml || '<tr><td colspan="9" style="text-align:center;color:#8c877d">暂无数据</td></tr>'}</tbody>` +
+      `</table></div>`;
+    wrap.innerHTML = head + table;
+    grid.appendChild(wrap);
+  }
+}
+
+/* 趋势：纯 CSS 柱状图（GPU 友好，无需 matplotlib） */
+async function loadTrends() {
+  const bridge = api();
+  if (!bridge) return;
+  const days = Math.max(1, Math.min(365, Number($("#tr-days").value) || 30));
+  $("#tr-status").textContent = "正在统计（HDD 大库可能较久）…";
+  $("#tr-refresh").disabled = true;
+  try {
+    const started = await bridge.get_trends(days);
+    if (!started || !started.ok) throw new Error((started && started.error) || "启动失败");
+    const st = await pollTask(started.task_id, (s) => {
+      if (s.progress) $("#tr-status").textContent = s.progress;
+    });
+    if (st.state !== "done" || !st.result || !st.result.ok) {
+      throw new Error((st.result && st.result.error) || st.error || "加载失败");
+    }
+    const res = st.result;
+    const wrap = $("#trend-wrap");
+    wrap.innerHTML = "";
+
+    const daily = res.daily || [];
+    if (daily.length) {
+      const maxV = Math.max(1, ...daily.map((d) => Number(d.cnt || d.count || 0)));
+      const chart = document.createElement("div");
+      chart.className = "bar-chart";
+      const labels = document.createElement("div");
+      labels.className = "bar-labels";
+      for (const d of daily) {
+        const v = Number(d.cnt || d.count || 0);
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.height = Math.max(2, (v / maxV) * 100) + "%";
+        bar.title = `${d.day || d.date || ""}: ${v.toLocaleString()}`;
+        chart.appendChild(bar);
+        const lb = document.createElement("span");
+        lb.textContent = String(d.day || d.date || "").slice(5);
+        labels.appendChild(lb);
+      }
+      const t1 = document.createElement("div");
+      t1.innerHTML = `<div class="card-sub">每日评论量（近 ${daily.length} 天，峰值 ${maxV.toLocaleString()}）</div>`;
+      wrap.append(t1, chart, labels);
+    }
+
+    const hourly = res.hourly || [];
+    if (hourly.length) {
+      const maxH = Math.max(1, ...hourly.map((h) => Number(h.cnt || h.count || 0)));
+      const chart2 = document.createElement("div");
+      chart2.className = "bar-chart";
+      const labels2 = document.createElement("div");
+      labels2.className = "bar-labels";
+      for (const h of hourly) {
+        const v = Number(h.cnt || h.count || 0);
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.height = Math.max(2, (v / maxH) * 100) + "%";
+        bar.title = `${h.hour ?? ""}时: ${v.toLocaleString()}`;
+        chart2.appendChild(bar);
+        const lb = document.createElement("span");
+        lb.textContent = String(h.hour ?? "");
+        labels2.appendChild(lb);
+      }
+      const t2 = document.createElement("div");
+      t2.innerHTML = `<div class="card-sub">24 小时活跃分布</div>`;
+      wrap.append(t2, chart2, labels2);
+    }
+    if (!daily.length && !hourly.length) {
+      wrap.innerHTML = '<div class="empty-hint">暂无趋势数据</div>';
+    }
+    $("#tr-status").textContent = `已加载 ${daily.length} 天趋势 / ${hourly.length} 个小时段`;
+  } catch (err) {
+    $("#tr-status").textContent = "加载失败: " + err;
+  } finally {
+    $("#tr-refresh").disabled = false;
+  }
+}
+
+/* 洞察：高频词 + 情感 */
+async function loadInsights() {
+  const bridge = api();
+  if (!bridge) return;
+  $("#ins-status").textContent = "正在抽样并计算…";
+  $("#ins-refresh").disabled = true;
+  try {
+    const started = await bridge.get_insights(5000, 20);
+    if (!started || !started.ok) throw new Error((started && started.error) || "启动失败");
+    const st = await pollTask(started.task_id);
+    if (st.state !== "done" || !st.result || !st.result.ok) {
+      throw new Error((st.result && st.result.error) || st.error || "计算失败");
+    }
+    const ins = st.result.insights || {};
+    const body = $("#ins-body");
+    body.innerHTML = "";
+
+    const senti = ins.sentiment || ins.sentiments || {};
+    if (Object.keys(senti).length) {
+      const row = document.createElement("div");
+      row.className = "senti-row";
+      const map = [["pos", "正面", "senti-pos"], ["neu", "中立", "senti-neu"],
+                   ["neg", "负面", "senti-neg"]];
+      for (const [k, label, cls] of map) {
+        const v = Number(senti[k] || senti[label] || 0);
+        const div = document.createElement("div");
+        div.className = "senti-item " + cls;
+        div.innerHTML = `<div class="n">${v.toLocaleString()}</div><div class="l">${label}</div>`;
+        row.appendChild(div);
+      }
+      body.appendChild(row);
+    }
+
+    const terms = ins.terms || [];
+    if (terms.length) {
+      const t = document.createElement("div");
+      t.innerHTML = '<div class="card-sub" style="margin:10px 0 6px">高频词 Top</div>';
+      const wall = document.createElement("div");
+      wall.className = "term-wall";
+      for (const item of terms.slice(0, 24)) {
+        const chip = document.createElement("span");
+        chip.className = "term-chip";
+        chip.innerHTML = `${escapeHtml(String(item.term || item.word || ""))} <b>${item.cnt || item.count || 0}</b>`;
+        wall.appendChild(chip);
+      }
+      body.append(t, wall);
+    }
+    if (!body.children.length) {
+      body.innerHTML = '<div class="empty-hint">样本不足，暂无洞察结果</div>';
+    }
+    $("#ins-status").textContent = st.result.cached
+      ? "来自缓存" : `样本 ${ins.total || "-"} 条，计算完成`;
+  } catch (err) {
+    $("#ins-status").textContent = "计算失败: " + err;
+  } finally {
+    $("#ins-refresh").disabled = false;
+  }
+}
+
+/* 水军检测 */
+async function runDetect() {
+  const bridge = api();
+  if (!bridge) return;
+  const bvid = $("#dt-bvid").value.trim();
+  const limit = Math.max(100, Number($("#dt-limit").value) || 5000);
+  $("#dt-status").textContent = "正在分析复读率/爆发/属地聚集…";
+  $("#dt-run").disabled = true;
+  try {
+    const started = await bridge.run_detect(bvid, limit, 50);
+    if (!started || !started.ok) throw new Error((started && started.error) || "启动失败");
+    const st = await pollTask(started.task_id);
+    if (st.state !== "done" || !st.result || !st.result.ok) {
+      throw new Error((st.result && st.result.error) || st.error || "检测失败");
+    }
+    const results = st.result.results || [];
+    $("#dt-summary").textContent = st.result.summary || "";
+    const body = $("#dt-rows");
+    body.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    for (const r of results) {
+      const tr = document.createElement("tr");
+      const level = { high: "高危", suspect: "存疑" }[r.level] || "正常";
+      const cells = [
+        r.uid, r.uname || "", r.total, r.repeat_rate, r.burst_max,
+        `${r.ip_top || "-"} ${r.ip_ratio || 0}`, r.score, level,
+        (r.hits || []).join("+") || "-",
+      ];
+      cells.forEach((v) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      if (r.level === "high") tr.style.background = "#fdf0ef";
+      else if (r.level === "suspect") tr.style.background = "#fff8e6";
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+    $("#dt-status").textContent =
+      `检测完成：${results.length} 个可疑账号（样本 ${st.result.total || 0} 条）`;
+  } catch (err) {
+    $("#dt-status").textContent = "检测失败: " + err;
+  } finally {
+    $("#dt-run").disabled = false;
+  }
+}
+
+$("#st-refresh").addEventListener("click", () => loadStatsOverview(true));
+$("#rk-refresh").addEventListener("click", loadRankings);
+$("#tr-refresh").addEventListener("click", loadTrends);
+$("#ins-refresh").addEventListener("click", loadInsights);
+$("#dt-run").addEventListener("click", runDetect);
+
+/* ═══════════ 搜索页扩展 ═══════════ */
+let searchView = "table";
+let lastSearchRows = [];
+let lastSearchKind = "comments";
+let searchPage = 0;
+const SEARCH_PAGE_SIZE = 100;
+const HISTORY_KEY = "bili-search-history";
+
+function loadHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    const dl = $("#search-history");
+    dl.innerHTML = "";
+    for (const h of list.slice(0, 20)) {
+      const opt = document.createElement("option");
+      opt.value = h;
+      dl.appendChild(opt);
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+function pushHistory(kw) {
+  try {
+    const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    const next = [kw, ...list.filter((x) => x !== kw)].slice(0, 20);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+    loadHistory();
+  } catch (e) { /* 忽略 */ }
+}
+
+$("#search-view").addEventListener("click", (e) => {
+  const btn = e.target.closest(".pill");
+  if (!btn) return;
+  $$("#search-view .pill").forEach((p) => p.classList.toggle("active", p === btn));
+  searchView = btn.dataset.view;
+  const isText = searchView === "text";
+  $("#search-table-wrap").style.display = isText ? "none" : "block";
+  $("#search-text-wrap").style.display = isText ? "block" : "none";
+  $("#search-pager").style.display = isText ? "none" : "flex";
+  if (lastSearchRows.length) renderResults(lastSearchKind, pageRows());
+});
+
+function pageRows() {
+  const start = searchPage * SEARCH_PAGE_SIZE;
+  return lastSearchRows.slice(start, start + SEARCH_PAGE_SIZE);
+}
+
+function updatePager() {
+  const pages = Math.max(1, Math.ceil(lastSearchRows.length / SEARCH_PAGE_SIZE));
+  $("#search-pager").style.display = searchView === "text" ? "none" : "flex";
+  $("#pg-info").textContent =
+    `第 ${searchPage + 1}/${pages} 页 · 共 ${lastSearchRows.length.toLocaleString()} 条`;
+  $("#pg-prev").disabled = searchPage <= 0;
+  $("#pg-next").disabled = searchPage >= pages - 1;
+}
+
+$("#pg-prev").addEventListener("click", () => {
+  if (searchPage > 0) {
+    searchPage--;
+    renderResults(lastSearchKind, pageRows());
+    updatePager();
+  }
+});
+$("#pg-next").addEventListener("click", () => {
+  const pages = Math.ceil(lastSearchRows.length / SEARCH_PAGE_SIZE);
+  if (searchPage < pages - 1) {
+    searchPage++;
+    renderResults(lastSearchKind, pageRows());
+    updatePager();
+  }
+});
+
+/* 全文视图：把当前页结果渲染为可读文本 */
+function renderTextView(kind, rows) {
+  const box = $("#search-text");
+  box.innerHTML = "";
+  if (!rows.length) {
+    box.innerHTML = '<div class="stream-empty">暂无匹配内容</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const r of rows) {
+    const d = fmtRow(kind, r);
+    const div = document.createElement("div");
+    div.className = "stream-line";
+    const tag = document.createElement("span");
+    tag.className = "k-" + (kind === "danmaku" ? "dmk" : "cmt");
+    tag.textContent = kind === "danmaku" ? "[弹幕]" : (kind === "videos" ? "[视频]" : "[评论]");
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = ` ${d.ctime || d.pubdate || ""} ${d.sender || d.owner || ""} ` +
+      `${d.ip_location && d.ip_location !== "-" ? "· " + d.ip_location : ""} | `;
+    const body = document.createElement("span");
+    body.textContent = d.content || d.title || "";
+    div.append(tag, meta, body);
+    frag.appendChild(div);
+  }
+  box.appendChild(frag);
+}
+
+$("#search-export").addEventListener("click", async () => {
+  const bridge = api();
+  if (!bridge || !lastSearchRows.length) return;
+  $("#search-status").textContent = "正在导出 CSV…";
+  try {
+    const res = await bridge.export_search(lastSearchKind, lastSearchRows);
+    if (!res || !res.ok) throw new Error((res && res.error) || "导出失败");
+    $("#search-status").textContent =
+      `✓ 已导出 ${res.rows.toLocaleString()} 行到 ${res.path}`;
+  } catch (err) {
+    $("#search-status").textContent = "导出失败: " + err;
+  }
+});
+
+/* 研报：系统保存对话框 */
+$("#rp-browse").addEventListener("click", async () => {
+  const bridge = api();
+  if (!bridge) return;
+  const bvid = $("#rp-bvid").value.trim() || "video";
+  try {
+    const res = await bridge.pick_save_path(`report_${bvid}.html`,
+                                            ["HTML 网页文件 (*.html)"]);
+    if (res && res.ok && res.path) {
+      $("#rp-out").value = res.path;
+      $("#rp-status").textContent = `输出路径已选择: ${res.path}`;
+    } else if (res && !res.ok) {
+      $("#rp-status").textContent = "选择路径失败: " + res.error;
+    }
+  } catch (e) {
+    $("#rp-status").textContent = "选择路径失败: " + e;
+  }
 });
 
 /* ── 启动 ── */

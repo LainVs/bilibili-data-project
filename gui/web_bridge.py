@@ -458,3 +458,314 @@ def seed_from_hot(count: int = 10) -> dict:
             client.close()
         except Exception:
             pass
+
+
+# ─────────────── 连接页运维操作 ───────────────
+
+def admin_start_service(role: str) -> dict:
+    """提权启动 MySQL 服务（role: write=MySQL80 / read=MySQL80-E）。"""
+    import ctypes
+
+    svc = "MySQL80" if role == "write" else "MySQL80-E"
+    try:
+        from storage.db import clear_manual_offline
+
+        clear_manual_offline(role)
+    except Exception:
+        pass
+    try:
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "powershell.exe",
+            f'-NoProfile -Command "net start {svc}"', None, 0)
+        if ret <= 32:
+            return {"ok": False, "error": f"提权未确认或被取消 (代码 {ret})"}
+        return {"ok": True, "msg": f"已发起 {svc} 启动，请等待几秒后刷新"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def admin_stop_service(role: str) -> dict:
+    """提权停止 MySQL 服务。"""
+    import ctypes
+
+    svc = "MySQL80" if role == "write" else "MySQL80-E"
+    try:
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", "powershell.exe",
+            f'-NoProfile -Command "net stop {svc}"', None, 0)
+        if ret <= 32:
+            return {"ok": False, "error": f"提权失败 (代码 {ret})"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        from storage.db import set_manual_offline
+
+        set_manual_offline(role)
+    except Exception:
+        pass
+    try:
+        from storage.dao import _rclose_all
+
+        _rclose_all()
+    except Exception:
+        pass
+    return {"ok": True, "msg": f"已请求停止 {svc}"}
+
+
+def kill_stuck_queries() -> dict:
+    """清理耗时超过 300 秒的卡死查询（与 connection_panel._kill_stuck 同逻辑）。"""
+    from storage.db import get_conn
+
+    killed = 0
+    try:
+        c = get_conn("read")
+        with c.cursor() as cur:
+            cur.execute("SHOW FULL PROCESSLIST")
+            rows = cur.fetchall()
+            me = cur.connection.thread_id()
+            for r in rows:
+                rid = r.get("Id")
+                if rid == me or (r.get("Command") or "") == "Sleep":
+                    continue
+                if int(r.get("Time") or 0) <= 300:
+                    continue
+                info = str(r.get("Info") or "")
+                if "information_schema" in info or "stats_cache" in info:
+                    continue
+                try:
+                    with c.cursor() as kcur:
+                        kcur.execute(f"KILL {int(rid)}")
+                    killed += 1
+                except Exception:
+                    pass
+        c.close()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "killed": killed,
+            "msg": f"已清理 {killed} 个耗时过长查询"}
+
+
+def get_db_config() -> dict:
+    """当前数据库连接配置（脱敏显示）。"""
+    from config import get_config
+
+    cfg = get_config()
+    w = getattr(cfg, "mysql_write", cfg.mysql)
+    r = getattr(cfg, "mysql_archive", cfg.mysql)
+    return {
+        "ok": True,
+        "write": {"host": w["host"], "port": w["port"],
+                  "database": w["database"], "user": w["user"]},
+        "read": {"host": r["host"], "port": r["port"],
+                 "database": r["database"], "user": r["user"]},
+    }
+
+
+def archive_precheck() -> dict:
+    """归档前置检查：E 库连通性 + D 库各表行数。"""
+    from config import get_config
+    from gui.connection_panel import _test_conn
+
+    cfg = get_config()
+    e_cfg = getattr(cfg, "mysql_archive", cfg.mysql)
+    ok_e, msg_e = _test_conn(e_cfg)
+    if not ok_e:
+        return {"ok": False, "error": f"E 库未连通，无法归档：{msg_e}"}
+
+    counts: dict = {}
+    count_err = ""
+    try:
+        from storage.db import get_conn
+
+        c = get_conn("write")
+        try:
+            with c.cursor() as cur:
+                for t in ("raw_comments", "raw_danmaku", "meta_video", "dim_user"):
+                    cur.execute(f"SELECT COUNT(*) AS n FROM {t}")
+                    row = cur.fetchone()
+                    counts[t] = int((row or {}).get("n") or 0)
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        count_err = str(exc).splitlines()[0][:200]
+
+    try:
+        from storage.archive_sync import _MIN_ROWS_FOR_NEW_SHARD as threshold
+    except Exception:
+        threshold = 2000000
+
+    return {"ok": True, "counts": counts, "count_err": count_err,
+            "total_est": counts.get("raw_comments", 0),
+            "threshold": threshold}
+
+
+def run_archive(progress_cb=None, stop_flag=None) -> dict:
+    """执行 D→E 分仓归档（长任务，与 connection_panel._manual_archive 同引擎）。"""
+    from storage.archive_sync import shard_archive
+
+    try:
+        res = shard_archive(progress_cb=progress_cb, stop_flag=stop_flag)
+        return {"ok": bool(res.get("ok")), "msg": res.get("msg", ""),
+                "raw": res}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ─────────────── 统计页 ───────────────
+
+RANK_META = {
+    "top_users": ("发言最多的人", [("uname", "用户"), ("cnt", "发言数")]),
+    "top_texts": ("重复文案 Top", [("content", "内容"), ("cnt", "重复次数")]),
+    "top_liked": ("高赞评论", [("content", "内容"), ("like_num", "赞")]),
+    "top_videos": ("被评视频", [("title", "标题"), ("cnt", "评论数")]),
+    "top_ups": ("被评 UP", [("uname", "UP"), ("cnt", "评论数")]),
+}
+
+
+def get_rankings_data(top_n: int = 20, progress_cb=None) -> dict:
+    """5 大排行榜（可能耗时数十秒，需异步 + 进度）。"""
+    from analysis import stats_service
+
+    if progress_cb:
+        try:
+            progress_cb("正在统计排行榜（大库可能数十秒）…")
+        except Exception:
+            pass
+    try:
+        ranks = stats_service.get_rankings(top=top_n)
+    except TypeError:
+        ranks = stats_service.get_rankings()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    out = {}
+    for key, rows in (ranks or {}).items():
+        meta = RANK_META.get(key)
+        cols = meta[1] if meta else None
+        out[key] = {
+            "title": meta[0] if meta else key,
+            "columns": [{"key": c[0], "label": c[1]} for c in (cols or [])],
+            "rows": rows or [],
+        }
+    return {"ok": True, "rankings": out}
+
+
+def get_trend_data(days: int = 30) -> dict:
+    """趋势数据：每日评论 + 24 小时分布。"""
+    from analysis import stats_service
+
+    try:
+        daily = stats_service.get_daily_comments(days)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "daily": [], "hourly": []}
+    try:
+        hourly = stats_service.get_hourly_comments()
+    except Exception:
+        hourly = []
+    return {"ok": True, "daily": daily or [], "hourly": hourly or []}
+
+
+def get_insight_data(limit: int = 5000, top: int = 20, days: int = 30) -> dict:
+    """趋势洞察：高频词 + 情感分布 + 摘要。"""
+    from analysis import stats_service
+
+    cached, cached_at = (None, "")
+    try:
+        cached, cached_at = stats_service.load_cached_insights()
+    except Exception:
+        pass
+    if cached:
+        return {"ok": True, "insights": cached, "cached_at": cached_at,
+                "cached": True}
+    try:
+        rows = stats_service.sample_texts_for_insight(limit=limit, days=days)
+        ins = stats_service.compute_insights(rows, top=top)
+        summary = stats_service.insights_summary(ins)
+        try:
+            stats_service.save_cached_insights(ins)
+        except Exception:
+            pass
+        return {"ok": True, "insights": ins, "summary": summary,
+                "cached": False}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_detect_data(bvid: str = "", limit: int = 5000, top: int = 50) -> dict:
+    """水军/刷屏检测。"""
+    from analysis import stats_service
+
+    try:
+        rows, meta = stats_service.fetch_rows_for_detect(bvid, limit)
+        res = stats_service.detect_for_video(bvid, limit=limit, top=top)
+        summary = stats_service.detect_summary(res)
+        return {"ok": True, "results": (res or {}).get("results") or [],
+                "total": (res or {}).get("total", 0),
+                "summary": summary, "meta": meta}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def export_rows_csv(kind: str, rows: list, path: str = "") -> dict:
+    """通用 CSV 导出（UTF-8 BOM，Excel 直接可读）。"""
+    import csv
+    import os
+
+    rows = rows or []
+    if not rows:
+        return {"ok": False, "error": "没有可导出的结果"}
+
+    if not path:
+        from pathlib import Path
+
+        base = Path("logs")
+        base.mkdir(exist_ok=True)
+        path = str(base / f"{kind}.csv")
+
+    keys: list[str] = []
+    for r in rows:
+        for k in r:
+            if k not in keys:
+                keys.append(k)
+    try:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        return {"ok": True, "path": os.path.abspath(path), "rows": len(rows)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def export_search_csv(kind: str, rows: list, path: str = "") -> dict:
+    """把检索结果导出为 CSV（UTF-8 BOM，Excel 直接可读）。"""
+    import csv
+    import os
+
+    rows = rows or []
+    if not rows:
+        return {"ok": False, "error": "没有可导出的结果"}
+
+    if not path:
+        from pathlib import Path
+
+        base = Path("logs")
+        base.mkdir(exist_ok=True)
+        path = str(base / f"search_{kind}.csv")
+
+    keys: list[str] = []
+    for r in rows:
+        for k in r:
+            if k not in keys:
+                keys.append(k)
+    try:
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        return {"ok": True, "path": os.path.abspath(path), "rows": len(rows)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}

@@ -285,12 +285,20 @@ class JsApi:
 
     # ── 采集页 ──
     def start_collect(self, target: str, mode: str = "video",
-                      comments: bool = True, danmaku: bool = False) -> dict:
+                      comments: bool = True, danmaku: bool = False,
+                      incremental: bool = True, direction: str = "both",
+                      max_users: int = 0) -> dict:
         """启动采集任务，消息通过 window.onCollectBatch 实时推送。"""
         import queue as _q
 
         try:
-            from gui.crawl_worker import CrawlWorker, PostCrawlWorker
+            from gui.crawl_worker import (
+                CrawlWorker,
+                FavCrawlWorker,
+                PostCrawlWorker,
+                RelationCrawlWorker,
+                UpCrawlWorker,
+            )
             from gui.web_bridge import extract_target_bvid
 
             target = (target or "").strip()
@@ -305,21 +313,35 @@ class JsApi:
             if existing is not None and existing.running:
                 return {"ok": False, "error": "已有采集任务在运行，请先停止"}
 
+            q = _q.Queue()
             if mode == "post":
-                q = _q.Queue()
-                worker = PostCrawlWorker(q, target=target,
-                                         comments=comments, incremental=True)
+                worker = PostCrawlWorker(q, target=target, comments=comments,
+                                         incremental=incremental)
+            elif mode in ("up", "fav", "rel"):
+                try:
+                    uid = int(target)
+                except (TypeError, ValueError):
+                    label = {"up": "UP主", "fav": "收藏夹", "rel": "关系"}[mode]
+                    return {"ok": False, "error": f"{label} UID 需为纯数字"}
+                if mode == "up":
+                    worker = UpCrawlWorker(q, uid=uid, comments=comments,
+                                           danmaku=danmaku, incremental=incremental)
+                elif mode == "fav":
+                    worker = FavCrawlWorker(q, uid=uid, comments=comments,
+                                            danmaku=danmaku, incremental=incremental)
+                else:
+                    worker = RelationCrawlWorker(
+                        q, uid=uid, comments=comments, danmaku=danmaku,
+                        incremental=incremental, direction=direction,
+                        max_users=max_users)
             else:
                 parsed = extract_target_bvid(target)
                 if not parsed.get("ok"):
                     return {"ok": False, "error": parsed.get("error", "无法识别 BV 号")}
                 if parsed.get("kind") == "shortlink":
                     return {"ok": False, "need_resolve": True,
-                            "link": parsed["link"],
-                            "error": "需要先解析短链"}
-                bvid = parsed["bvid"]
-                q = _q.Queue()
-                worker = CrawlWorker(q, bvid=bvid,
+                            "link": parsed["link"], "error": "需要先解析短链"}
+                worker = CrawlWorker(q, bvid=parsed["bvid"],
                                      comments=comments, danmaku=danmaku)
 
             runner = _CollectRunner(self._win, q)
@@ -330,6 +352,63 @@ class JsApi:
         except Exception as exc:
             logger.exception("start_collect failed")
             return {"ok": False, "error": str(exc)}
+
+    def start_batch(self, uids: list, comments: bool = True, danmaku: bool = False,
+                    ck_up: bool = True, ck_fav: bool = False, ck_rel: bool = False,
+                    rel_dir: str = "both", append: bool = False) -> dict:
+        """批量 UID 采集（运行中可追加接续）。"""
+        import queue as _q
+
+        from gui.crawl_worker import BatchUpWorker
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        uids = [int(u) for u in (uids or []) if str(u).strip().isdigit()]
+        if not uids:
+            return {"ok": False, "error": "请粘贴至少一个 UID"}
+
+        runner = _RUNNERS.get("current")
+        if append:
+            if runner is None or not runner.running:
+                return {"ok": False, "error": "没有运行中的批量任务可追加"}
+            worker = runner.worker
+            try:
+                kinds = []
+                if ck_up:
+                    kinds.append("up")
+                if ck_fav:
+                    kinds.append("fav")
+                if ck_rel:
+                    kinds.append("rel")
+                jobs = [{"kind": k, "uid": u, "direction": rel_dir}
+                        for u in uids for k in kinds]
+                worker.add_jobs(jobs)
+                return {"ok": True, "appended": len(uids), "jobs": len(jobs)}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        if runner is not None and runner.running:
+            return {"ok": False, "error": "已有任务在运行，请先停止"}
+
+        q = _q.Queue()
+        worker = BatchUpWorker(q, comments=comments, danmaku=danmaku)
+        kinds = []
+        if ck_up:
+            kinds.append("up")
+        if ck_fav:
+            kinds.append("fav")
+        if ck_rel:
+            kinds.append("rel")
+        if not kinds:
+            return {"ok": False, "error": "请至少勾选一种采集类型（UP视频/收藏夹/关注粉丝）"}
+        jobs = [{"kind": k, "uid": u, "direction": rel_dir}
+                for u in uids for k in kinds]
+        worker.add_jobs(jobs)
+
+        runner = _CollectRunner(self._win, q)
+        _RUNNERS["current"] = runner
+        runner.start(worker)
+        return {"ok": True, "count": len(uids), "jobs": len(jobs)}
 
     def stop_collect(self) -> dict:
         """停止当前采集任务（软停止：已采数据仍会落库）。"""
@@ -551,6 +630,228 @@ class JsApi:
         try:
             worker.pause()
             return {"ok": True, "paused": bool(worker.is_paused())}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── 连接页运维操作 ──
+    def start_service(self, role: str = "write") -> dict:
+        """提权启动 MySQL 服务（会弹 UAC）。"""
+        from gui.web_bridge import admin_start_service
+
+        try:
+            return admin_start_service(role)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def stop_service(self, role: str = "write") -> dict:
+        """提权停止 MySQL 服务（会弹 UAC）。"""
+        from gui.web_bridge import admin_stop_service
+
+        try:
+            return admin_stop_service(role)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def kill_stuck(self) -> dict:
+        """清理卡死的长查询。"""
+        from gui.web_bridge import kill_stuck_queries
+
+        try:
+            return kill_stuck_queries()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_db_config(self) -> dict:
+        """当前数据库连接配置。"""
+        from gui.web_bridge import get_db_config as _cfg
+
+        try:
+            return _cfg()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def start_archive(self) -> dict:
+        """启动 D→E 归档（长任务，进度推送到 onArchiveLog）。"""
+        from gui.web_bridge import archive_precheck, run_archive
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        existing = _RUNNERS.get("archive")
+        if existing is not None and existing.running:
+            return {"ok": False, "error": "已有归档任务在运行"}
+
+        pre = archive_precheck()
+        if not pre.get("ok"):
+            return {"ok": False, "error": pre.get("error", "预检失败")}
+
+        runner = _CollectRunner(self._win, None)
+        runner.event_sink = "onArchiveLog"
+        _RUNNERS["archive"] = runner
+        stop_flag = threading.Event()
+        runner.stop_flag = stop_flag
+
+        def _run() -> None:
+            runner.running = True
+            try:
+                runner.push_event({"type": "precheck", "data": pre})
+
+                def _prog(msg: str) -> None:
+                    runner.push_event({"type": "log", "text": str(msg)})
+
+                res = run_archive(progress_cb=_prog, stop_flag=stop_flag)
+                runner.push_event({"type": "finished", "result": res})
+            except Exception as exc:
+                logger.exception("archive failed")
+                runner.push_event({"type": "error", "text": str(exc)})
+            finally:
+                runner.running = False
+                runner.push_event({"type": "runner_done"})
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "precheck": pre}
+
+    def stop_archive(self) -> dict:
+        """请求取消归档（逐批路径可随时中断，已删部分实时提交）。"""
+        runner = _RUNNERS.get("archive")
+        if runner is None or not runner.running:
+            return {"ok": False, "error": "没有运行中的归档任务"}
+        flag = getattr(runner, "stop_flag", None)
+        if flag is not None:
+            flag.set()
+        return {"ok": True}
+
+    # ── 统计页 ──
+    def get_stats_overview(self, refresh: bool = False) -> dict:
+        """10 项总览指标（refresh=True 触发全表聚合）。"""
+        from analysis import stats_service
+
+        if not refresh:
+            from gui.web_bridge import read_overview
+
+            cached = read_overview()
+            if cached.get("stats"):
+                return cached
+        try:
+            stats = stats_service.get_overview()
+            try:
+                from storage import dao
+
+                dao.save_stats_cache({"stats": stats})
+            except Exception:
+                pass
+            return {"ok": True, "stats": stats, "cached": False}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "stats": None}
+
+    def get_rankings(self, top_n: int = 20) -> dict:
+        """5 大排行榜（长任务，走 task_id 轮询）。"""
+        from gui.web_bridge import get_rankings_data
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        tid = _TASKS.create("排行榜统计")
+
+        def _run() -> None:
+            try:
+                res = get_rankings_data(top_n,
+                                        progress_cb=lambda m: _TASKS.update(tid, m))
+                _TASKS.finish(tid, result=res)
+            except Exception as exc:
+                _TASKS.finish(tid, error=str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "task_id": tid}
+
+    def get_trends(self, days: int = 30) -> dict:
+        """趋势数据（每日 + 24 小时）。HDD 大库较慢，走 task_id 轮询。"""
+        from gui.web_bridge import get_trend_data
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        tid = _TASKS.create("趋势统计")
+        _TASKS.update(tid, "正在统计每日评论与小时分布…")
+
+        def _run() -> None:
+            try:
+                _TASKS.finish(tid, result=get_trend_data(days))
+            except Exception as exc:
+                _TASKS.finish(tid, error=str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "task_id": tid}
+
+    def get_insights(self, limit: int = 5000, top: int = 20) -> dict:
+        """趋势洞察（长任务，走 task_id 轮询）。"""
+        from gui.web_bridge import get_insight_data
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        tid = _TASKS.create("趋势洞察")
+        _TASKS.update(tid, "正在抽样并计算词频/情感…")
+
+        def _run() -> None:
+            try:
+                _TASKS.finish(tid, result=get_insight_data(limit, top))
+            except Exception as exc:
+                _TASKS.finish(tid, error=str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "task_id": tid}
+
+    def run_detect(self, bvid: str = "", limit: int = 5000, top: int = 50) -> dict:
+        """水军检测（长任务，走 task_id 轮询）。"""
+        from gui.web_bridge import get_detect_data
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        tid = _TASKS.create("水军检测")
+        _TASKS.update(tid, "正在分析复读率/爆发/属地聚集…")
+
+        def _run() -> None:
+            try:
+                _TASKS.finish(tid, result=get_detect_data(bvid, limit, top))
+            except Exception as exc:
+                _TASKS.finish(tid, error=str(exc))
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True, "task_id": tid}
+
+    # ── 搜索页扩展 ──
+    def export_search(self, kind: str, rows: list) -> dict:
+        """导出检索结果到 CSV。"""
+        from gui.web_bridge import export_search_csv
+
+        try:
+            return export_search_csv(kind, rows)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def export_user_rows(self, uid: int, rows: list) -> dict:
+        """导出某用户发言历史到 CSV。"""
+        from gui.web_bridge import export_rows_csv
+
+        try:
+            return export_rows_csv(f"user_{uid}_history", rows)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def pick_save_path(self, default_name: str = "output.html",
+                       filetypes: list | None = None) -> dict:
+        """弹出系统保存对话框，返回用户选择的路径（空串=取消）。"""
+        try:
+            import webview
+
+            win = self._win or (webview.windows[0] if webview.windows else None)
+            if win is None:
+                return {"ok": False, "error": "窗口未就绪"}
+            types = filetypes or ("HTML 网页文件 (*.html)",)
+            result = win.create_file_dialog(
+                webview.SAVE_DIALOG, save_filename=default_name,
+                file_types=types)
+            if not result:
+                return {"ok": True, "path": "", "cancelled": True}
+            path = result if isinstance(result, str) else result[0]
+            return {"ok": True, "path": path}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
