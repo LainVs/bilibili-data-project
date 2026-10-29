@@ -405,3 +405,56 @@ def load_videos_for_update() -> dict:
             "flag": flag,
         })
     return {"ok": True, "rows": rows, "total": len(rows)}
+
+
+def get_db_size_mb() -> dict:
+    """当前库占用（MB），用于广泛采集页的存储护栏显示。"""
+    from storage import dao
+
+    try:
+        mb = dao.get_db_size() / (1024 * 1024)
+        return {"ok": True, "mb": round(mb, 1)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def seed_from_library(count: int = 10) -> dict:
+    """从库内精选活跃 UP 作为种子（跨全库 Top 随机抽）。"""
+    from storage import dao
+
+    try:
+        uids = dao.query_top_up_uids(max(1, int(count)))
+        return {"ok": True, "uids": list(uids or [])}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "uids": []}
+
+
+def seed_from_hot(count: int = 10) -> dict:
+    """从 B站热搜榜取 UP 去重后作为种子（联网，与 broad_panel._seed_from_hot 同路径）。"""
+    from crawler.api.client import ApiClient
+    from crawler.api.popular import PopularFetcher
+
+    want = max(1, min(100, int(count)))
+    client = ApiClient()
+    try:
+        fetcher = PopularFetcher(client)
+        items = fetcher.collect(count=max(20, want * 2))
+        uids: list[int] = []
+        seen: set[int] = set()
+        for v in items:
+            uid = int(v.get("owner_uid") or 0)
+            if uid and uid not in seen:
+                seen.add(uid)
+                uids.append(uid)
+            if len(uids) >= want:
+                break
+        if not uids:
+            return {"ok": False, "error": "热搜未取到 UP", "uids": []}
+        return {"ok": True, "uids": uids}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "uids": []}
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass

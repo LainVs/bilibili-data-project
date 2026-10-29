@@ -22,6 +22,7 @@ function showPage(name) {
   if (name === "search") setTimeout(() => $("#search-input").focus(), 50);
   if (name === "collect") { loadUpStats(); loadVideoOptions(); }
   if (name === "update") loadUpdateVideos();
+  if (name === "broad") { loadBroadUps(); loadDbSize(); }
   if (name === "user") setTimeout(() => $("#uq-uid").focus(), 50);
 }
 
@@ -832,8 +833,231 @@ $("#uq-search").addEventListener("click", queryUser);
 $("#uq-uid").addEventListener("keydown", (e) => { if (e.key === "Enter") queryUser(); });
 
 /* ═══════════ 广泛采集页 ═══════════ */
-$("#br-switch-tk")?.addEventListener("click", () => {
-  alert("请关闭当前窗口后运行：\n\npython main.py gui --engine tk\n\n或在命令行直接使用：python main.py up <UID>");
+let brRunning = false;
+let brPaused = false;
+
+function brBadge(text, cls) {
+  const b = $("#br-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function brLog(text, cls = "") {
+  if ($("#br-pause-stream").checked) return;   // 暂停实时流
+  const box = $("#br-stream");
+  const empty = box.querySelector(".stream-empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "stream-line " + cls;
+  div.textContent = text;
+  box.appendChild(div);
+  while (box.children.length > 1500) box.removeChild(box.firstElementChild);
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+/* 后端广泛采集推送入口（与采集页同构，复用 _CollectRunner） */
+window.onBroadBatch = function (payload) {
+  if (!payload) return;
+  const box = $("#br-stream");
+  const items = payload.items || [];
+  if (items.length && !$("#br-pause-stream").checked) {
+    const empty = box.querySelector(".stream-empty");
+    if (empty) empty.remove();
+    const frag = document.createDocumentFragment();
+    for (const it of items) {
+      const d = it.data || {};
+      const div = document.createElement("div");
+      div.className = "stream-line";
+      const tag = document.createElement("span");
+      tag.className = "k-" + (it.kind === "danmaku" ? "dmk" : "cmt");
+      tag.textContent = it.kind === "danmaku" ? "[弹幕]" : "[评论]";
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      const who = d.uid ? ` uid${d.uid}` : (d.mid_hash ? ` #${d.mid_hash}` : "");
+      const loc = d.ip_location ? ` · ${d.ip_location}` : "";
+      meta.textContent = ` ${d.ctime || ""}${who}${loc} | `;
+      div.append(tag, meta, document.createTextNode(String(d.content || "").slice(0, 300)));
+      frag.appendChild(div);
+    }
+    box.appendChild(frag);
+    const overflow = box.children.length - 1500;
+    for (let i = 0; i < overflow; i++) box.removeChild(box.firstElementChild);
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    if (nearBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  for (const ev of payload.events || []) {
+    const t = ev.type;
+    if (t === "progress") {
+      if (ev.text) $("#br-stream-status").textContent = ev.text;
+      if (ev.vpos != null) $("#br-up-count").textContent = `${ev.vpos} 个`;
+    } else if (t === "meta") {
+      $("#br-stream-status").textContent = ev.title || "采集中…";
+    } else if (t === "error") {
+      brLog("✗ " + (ev.text || "失败"), "err");
+      brBadge("失败", "offline");
+    } else if (t === "done") {
+      brLog("✓ 广泛采集完成", "ok");
+      brBadge("已完成", "online");
+      setBrRunning(false);
+      loadBroadUps();
+    } else if (t === "runner_done") {
+      setBrRunning(false);
+      loadBroadUps();
+    }
+  }
+};
+
+function setBrRunning(on) {
+  brRunning = on;
+  $("#br-start").disabled = on;
+  $("#br-stop").disabled = !on;
+  $("#br-pause").disabled = !on;
+  $("#br-progress-wrap").style.display = on ? "block" : "none";
+  $("#br-start").textContent = on ? "采集中…" : "开始广泛采集";
+}
+
+function parseSeeds(text) {
+  return String(text || "").split(/[,\s\n;；]+/).map((s) => s.trim())
+    .filter((s) => /^\d+$/.test(s)).map(Number);
+}
+
+function brParams() {
+  const num = (id) => Number($(id).value) || 0;
+  return {
+    max_depth: num("#br-max_depth"), max_ups: num("#br-max_ups"),
+    max_pages: num("#br-max_pages"), top_n: num("#br-top_n"),
+    min_comments: num("#br-min_comments"),
+    max_storage_mb: num("#br-max_storage_mb"),
+    perpetual: $("#br-perpetual").checked,
+  };
+}
+
+async function startBroad() {
+  const bridge = api();
+  if (!bridge || brRunning) return;
+  const seeds = parseSeeds($("#br-seeds").value);
+  if (!seeds.length) {
+    $("#br-status").textContent = "请先输入至少一个种子 UID";
+    return;
+  }
+  $("#br-stream").innerHTML = '<div class="stream-empty">正在启动…</div>';
+  brBadge("采集中", "checking");
+  $("#br-status").textContent = `种子 ${seeds.length} 个，正在启动 BFS 扩散…`;
+  setBrRunning(true);
+  try {
+    const res = await bridge.start_broad(seeds, brParams());
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+    $("#br-status").textContent = `已启动：种子 ${res.seeds} 个`;
+  } catch (err) {
+    brBadge("失败", "offline");
+    $("#br-status").textContent = "启动失败: " + err;
+    setBrRunning(false);
+  }
+}
+
+async function startHotCrawl() {
+  const bridge = api();
+  if (!bridge || brRunning) return;
+  const n = Math.max(1, Math.min(100, Number($("#br-hot-count").value) || 100));
+  brBadge("采集中", "checking");
+  $("#br-status").textContent = `正在采集热搜前 ${n} 个视频的评论…`;
+  setBrRunning(true);
+  try {
+    const res = await bridge.start_hot_crawl(n);
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+  } catch (err) {
+    brBadge("失败", "offline");
+    $("#br-status").textContent = "启动失败: " + err;
+    setBrRunning(false);
+  }
+}
+
+async function pauseBroad() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.pause_broad();
+    if (res && res.ok) {
+      brPaused = !!res.paused;
+      $("#br-pause").textContent = brPaused ? "继续" : "暂停";
+      $("#br-status").textContent = brPaused ? "已暂停" : "继续采集中…";
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+async function stopBroad() {
+  const bridge = api();
+  if (!bridge) return;
+  $("#br-status").textContent = "正在停止…";
+  try {
+    await bridge.stop_broad();
+    brLog("已请求停止（已采数据仍会落库）");
+  } catch (e) { /* 忽略 */ }
+}
+
+async function loadBroadUps() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_up_stats("");
+    const body = $("#br-up-rows");
+    body.innerHTML = "";
+    if (!res || !res.ok) return;
+    const rows = (res.rows || []).slice(0, 200);
+    $("#br-up-count").textContent = `${(res.rows || []).length} 个`;
+    const frag = document.createDocumentFragment();
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      [r.uid, r.total, r.fetched, r.comment_total].forEach((v) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+  } catch (e) { /* 静默 */ }
+}
+
+async function loadDbSize() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_db_size();
+    $("#br-dbsize").textContent = res && res.ok
+      ? `当前库占用：${res.mb} MB` : "库占用：未知（DB不可达）";
+  } catch (e) { /* 静默 */ }
+}
+
+async function seedFrom(kind) {
+  const bridge = api();
+  if (!bridge) return;
+  const n = Math.max(1, Math.min(100, Number($("#br-seed-count").value) || 10));
+  $("#br-status").textContent = kind === "lib" ? "正在从库内精选 UP…" : "正在获取热搜 UP…";
+  try {
+    const res = kind === "lib"
+      ? await bridge.get_library_seeds(n)
+      : await bridge.get_hot_seeds(n);
+    if (!res || !res.ok) throw new Error((res && res.error) || "获取失败");
+    $("#br-seeds").value = (res.uids || []).join("\n");
+    $("#br-status").textContent =
+      `已载入 ${res.uids.length} 个种子，点击「开始广泛采集」启动`;
+  } catch (err) {
+    $("#br-status").textContent = "获取种子失败: " + err;
+  }
+}
+
+$("#br-start").addEventListener("click", startBroad);
+$("#br-hot").addEventListener("click", startHotCrawl);
+$("#br-pause").addEventListener("click", pauseBroad);
+$("#br-stop").addEventListener("click", stopBroad);
+$("#br-seed-lib").addEventListener("click", () => seedFrom("lib"));
+$("#br-seed-hot").addEventListener("click", () => seedFrom("hot"));
+$("#br-clear").addEventListener("click", () => {
+  $("#br-stream").innerHTML = '<div class="stream-empty">实时内容将在此显示</div>';
+  $("#br-up-rows").innerHTML = "";
 });
 
 /* ── 启动 ── */

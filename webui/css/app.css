@@ -265,6 +265,17 @@ html, body {
 .stream-line.ok { color: #4ade80; }
 .stream-line.progress { color: #f28b6d; }
 
+/* ── 广泛采集页 ── */
+.param-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px 14px;
+}
+.param-grid label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--fg-muted);
+}
+.param-grid .form-input { width: 100%; }
+
 /* ── 占位卡（迁移中的页面）── */
 .placeholder-card { text-align: center; padding: 48px 24px; }
 .placeholder-icon { font-size: 36px; }

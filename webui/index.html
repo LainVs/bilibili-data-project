@@ -313,18 +313,73 @@
       <section class="page" data-page="broad">
         <header class="page-head">
           <h1>广泛采集</h1>
-          <p class="hint">BFS 自动扩展采集：从种子用户出发，按关系链层层扩散</p>
+          <p class="hint">BFS 自动扩展：以种子 UID 为起点，按关系链层层扩散，自动反推新 UP 并采集评论</p>
         </header>
+
         <div class="card">
-          <div class="card-head"><div><div class="card-title">扩散采集</div>
-            <div class="card-sub">该功能涉及复杂的 BFS 调度与多层去重，推荐使用经典 Tk 引擎</div></div></div>
-          <div class="form-row">
-            <button class="btn-accent" id="br-switch-tk">切换到经典 Tk 引擎</button>
+          <div class="card-head"><div><div class="card-title">种子 UID（BFS 起点）</div>
+            <div class="card-sub">逗号 / 空格 / 换行分隔，可粘贴多个</div></div>
+            <span class="badge" id="br-badge">待命</span></div>
+          <textarea id="br-seeds" class="form-input form-wide" rows="2"
+                    style="resize:vertical;width:100%"
+                    placeholder="946974, 123456&#10;每行一个或逗号分隔"></textarea>
+          <div class="form-row" style="margin-top:8px">
+            <button class="btn-ghost" id="br-seed-lib">从库内UP起采（10个）</button>
+            <button class="btn-ghost" id="br-seed-hot">从热搜UP起采</button>
+            <label>个数</label>
+            <input id="br-seed-count" class="form-input form-num" type="number" value="10" min="1" max="100" />
+            <span class="spacer"></span>
+            <span class="status-line" id="br-dbsize">库占用查询中…</span>
           </div>
-          <div class="status-line" style="margin-top:10px">
-            广泛采集包含关系图遍历、收藏夹递归、多层深度控制等复杂交互，
-            迁移收益低于风险。命令行等价能力：
-            <code style="background:var(--bg-muted);padding:2px 6px;border-radius:4px">python main.py up &lt;UID&gt;</code>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">扩散参数</div>
+            <div class="card-sub">深度与上限越大，覆盖越广，耗时也越长</div></div></div>
+          <div class="param-grid">
+            <label>最大深度<input id="br-max_depth" class="form-input" type="number" value="9999" /></label>
+            <label>UP上限<input id="br-max_ups" class="form-input" type="number" value="999999" /></label>
+            <label>视频列表页数<input id="br-max_pages" class="form-input" type="number" value="500" /></label>
+            <label>每UP反推上限<input id="br-top_n" class="form-input" type="number" value="100" /></label>
+            <label>候选最少评论数<input id="br-min_comments" class="form-input" type="number" value="1" /></label>
+            <label>存储上限MB<input id="br-max_storage_mb" class="form-input" type="number" value="25000" /></label>
+          </div>
+          <div class="form-row" style="margin-top:10px">
+            <label class="check-row"><input id="br-perpetual" type="checkbox" /><span>永续采集（不自动停止）</span></label>
+          </div>
+          <div class="form-row">
+            <button class="btn-accent" id="br-start">开始广泛采集</button>
+            <button class="btn-ghost" id="br-pause" disabled>暂停</button>
+            <button class="btn-ghost" id="br-stop" disabled>■ 停止</button>
+            <button class="btn-ghost" id="br-hot">一键采集热搜视频评论</button>
+            <label>数量</label>
+            <input id="br-hot-count" class="form-input form-num" type="number" value="100" min="1" max="100" />
+            <span class="spacer"></span>
+            <button class="btn-ghost" id="br-clear">清空流/表</button>
+          </div>
+          <div class="progress-track" id="br-progress-wrap" style="display:none">
+            <div class="progress-bar indeterminate"></div>
+          </div>
+          <div class="status-line" id="br-status">就绪。粘贴种子 UID 开始。</div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">已采集 UP</div>
+            <div class="card-sub" id="br-up-count">0 个</div></div></div>
+          <div class="result-table-wrap" style="max-height:220px">
+            <table class="result-table">
+              <thead><tr><th>UID</th><th>视频总数</th><th>已采/总</th><th>评论数</th></tr></thead>
+              <tbody id="br-up-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">实时内容流</div>
+            <div class="card-sub" id="br-stream-status">等待开始…</div></div>
+            <label class="check-row"><input id="br-pause-stream" type="checkbox" /><span>暂停实时流</span></label></div>
+          <div class="stream-box" id="br-stream" style="height:240px">
+            <div class="stream-empty">实时内容将在此显示</div>
           </div>
         </div>
       </section>

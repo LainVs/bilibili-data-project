@@ -444,6 +444,116 @@ class JsApi:
         runner.running = False
         return {"ok": True}
 
+    # ── 广泛采集页 ──
+    def get_db_size(self) -> dict:
+        """当前库占用（MB），存储护栏展示用。"""
+        from gui.web_bridge import get_db_size_mb
+
+        try:
+            return get_db_size_mb()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def get_library_seeds(self, count: int = 10) -> dict:
+        """从库内精选活跃 UP 作为种子。"""
+        from gui.web_bridge import seed_from_library
+
+        try:
+            return seed_from_library(count)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "uids": []}
+
+    def get_hot_seeds(self, count: int = 10) -> dict:
+        """从热搜榜取 UP 作为种子（联网）。"""
+        from gui.web_bridge import seed_from_hot
+
+        try:
+            return seed_from_hot(count)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "uids": []}
+
+    def start_broad(self, seeds: list, params: dict | None = None) -> dict:
+        """启动广泛采集（BFS 扩散），实时推送内容流。"""
+        import queue as _q
+
+        from gui.crawl_worker import BroadCrawlWorker
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        existing = _RUNNERS.get("broad")
+        if existing is not None and existing.running:
+            return {"ok": False, "error": "广泛采集已在运行"}
+
+        try:
+            seed_uids = [int(s) for s in (seeds or []) if str(s).strip().isdigit()]
+        except (TypeError, ValueError):
+            seed_uids = []
+        if not seed_uids:
+            return {"ok": False, "error": "请先输入至少一个种子 UID"}
+
+        p = params or {}
+        try:
+            q = _q.Queue()
+            worker = BroadCrawlWorker(
+                q,
+                seeds=seed_uids,
+                max_depth=int(p.get("max_depth", 9999)),
+                max_ups=int(p.get("max_ups", 999999)),
+                max_pages=int(p.get("max_pages", 500)),
+                top_n=int(p.get("top_n", 100)),
+                min_comments=int(p.get("min_comments", 1)),
+                max_storage_mb=int(p.get("max_storage_mb", 25000)),
+                perpetual=bool(p.get("perpetual", False)),
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"参数错误: {exc}"}
+
+        runner = _CollectRunner(self._win, q)
+        runner.event_sink = "onBroadBatch"
+        _RUNNERS["broad"] = runner
+        runner.start(worker)
+        return {"ok": True, "seeds": len(seed_uids)}
+
+    def start_hot_crawl(self, count: int = 100) -> dict:
+        """一键采集热搜视频评论。"""
+        import queue as _q
+
+        from gui.crawl_worker import PopularCrawlWorker
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        existing = _RUNNERS.get("broad")
+        if existing is not None and existing.running:
+            return {"ok": False, "error": "已有任务在运行"}
+
+        q = _q.Queue()
+        worker = PopularCrawlWorker(q, count=max(1, min(100, int(count))))
+        runner = _CollectRunner(self._win, q)
+        runner.event_sink = "onBroadBatch"
+        _RUNNERS["broad"] = runner
+        runner.start(worker)
+        return {"ok": True}
+
+    def stop_broad(self) -> dict:
+        """停止广泛采集任务。"""
+        runner = _RUNNERS.get("broad")
+        if runner is None or not runner.running:
+            return {"ok": False, "error": "没有运行中的广泛采集任务"}
+        runner.stop()
+        return {"ok": True}
+
+    def pause_broad(self) -> dict:
+        """暂停/继续广泛采集。"""
+        runner = _RUNNERS.get("broad")
+        if runner is None or not runner.running:
+            return {"ok": False, "error": "没有运行中的任务"}
+        worker = runner.worker
+        try:
+            worker.pause()
+            return {"ok": True, "paused": bool(worker.is_paused())}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     # ── 窗口控制 ──
     def minimize(self) -> None:
         try:
