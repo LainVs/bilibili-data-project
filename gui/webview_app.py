@@ -87,6 +87,18 @@ class _CollectRunner:
         self.stats = {"comments": 0, "danmaku": 0}
         self.worker = None
         self._job = None
+        self.event_sink = "onCollectBatch"   # 前端回调名（增量页改为 onIncrementLog）
+        self.stop_flag = None
+
+    def push_event(self, ev: dict) -> None:
+        """向事件型页面（增量轮询）推送单条事件。"""
+        try:
+            import json
+
+            self.win.evaluate_js(
+                f"window.{self.event_sink}({json.dumps(ev, ensure_ascii=False)})")
+        except Exception:
+            pass
 
     def start(self, worker) -> None:
         self.worker = worker
@@ -362,6 +374,75 @@ class JsApi:
             return load_stored_content(bvid, limit)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    # ── 用户查询页 ──
+    def query_user(self, uid: int, limit: int = 500) -> dict:
+        """用户画像 + 全部发言历史。"""
+        from gui.web_bridge import query_user_history
+
+        try:
+            return query_user_history(uid, limit)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # ── 增量轮询页 ──
+    def get_update_videos(self) -> dict:
+        """已采集视频表（含完成状态）。"""
+        from gui.web_bridge import load_videos_for_update
+
+        try:
+            return load_videos_for_update()
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "rows": []}
+
+    def start_increment(self, mode: str = "all", max_pages: int = 100) -> dict:
+        """启动增量补采（后台线程 + 实时推送日志）。"""
+        from gui.web_bridge import run_increment_once, run_ups_batch
+
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        existing = _RUNNERS.get("increment")
+        if existing is not None and existing.running:
+            return {"ok": False, "error": "增量任务已在运行"}
+
+        runner = _CollectRunner(self._win, None)
+        runner.event_sink = "onIncrementLog"
+        _RUNNERS["increment"] = runner
+        stop_flag = threading.Event()
+        runner.stop_flag = stop_flag
+
+        def _run() -> None:
+            runner.running = True
+            try:
+                def _log(msg: str) -> None:
+                    runner.push_event({"type": "log", "text": str(msg)})
+
+                if mode == "ups":
+                    res = run_ups_batch(max_pages=max_pages, progress_cb=_log,
+                                        stop_flag=stop_flag)
+                else:
+                    res = run_increment_once(progress_cb=_log, stop_flag=stop_flag)
+                runner.push_event({"type": "finished", "result": res})
+            except Exception as exc:
+                logger.exception("increment failed")
+                runner.push_event({"type": "error", "text": str(exc)})
+            finally:
+                runner.running = False
+                runner.push_event({"type": "runner_done"})
+
+        threading.Thread(target=_run, daemon=True).start()
+        return {"ok": True}
+
+    def stop_increment(self) -> dict:
+        """停止增量任务。"""
+        runner = _RUNNERS.get("increment")
+        if runner is None or not runner.running:
+            return {"ok": False, "error": "没有运行中的增量任务"}
+        flag = getattr(runner, "stop_flag", None)
+        if flag is not None:
+            flag.set()
+        runner.running = False
+        return {"ok": True}
 
     # ── 窗口控制 ──
     def minimize(self) -> None:

@@ -276,3 +276,132 @@ def resolve_shortlink(url: str) -> dict:
     if bvid:
         return {"ok": True, "bvid": bvid}
     return {"ok": False, "error": "短链解析失败，请改用完整 BV 号"}
+
+
+def query_user_history(uid: int, limit: int = 500) -> dict:
+    """用户画像 + 发言历史（复用 dao.query_user / by_uid）。"""
+    from gui.util import fmt_dt
+    from storage import dao
+
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "UID 需为纯数字"}
+
+    try:
+        user = dao.query_user(uid)
+    except Exception:
+        user = None
+    try:
+        comments = dao.query_comments_by_uid(uid, limit=limit)
+    except Exception:
+        comments = []
+    try:
+        danmaku = dao.query_danmaku_by_uid(uid, limit=limit)
+    except Exception:
+        danmaku = []
+
+    profile = None
+    if user:
+        profile = {
+            "uid": user.get("uid", uid),
+            "uname": user.get("uname") or "(未命名)",
+            "level": user.get("level", 0),
+            "vip": "大会员" if user.get("is_vip") else "普通用户",
+            "sex": user.get("sex") or "-",
+            "signature": (user.get("signature") or "")[:80],
+        }
+
+    def _fmt(rows: list, kind: str) -> list:
+        out = []
+        for r in rows:
+            out.append({
+                "kind": kind,
+                "ctime": fmt_dt(r.get("ctime")),
+                "content": str(r.get("content", ""))[:300],
+                "ip_location": r.get("ip_location") or "-",
+                "like_num": r.get("like_num", 0),
+                "bvid": r.get("bvid", ""),
+                "title": str(r.get("title") or "")[:40],
+                "progress": r.get("progress", 0),
+            })
+        return out
+
+    return {"ok": True, "uid": uid, "profile": profile,
+            "comments": _fmt(comments, "评论"),
+            "danmaku": _fmt(danmaku, "弹幕")}
+
+
+def run_increment_once(progress_cb=None, item_cb=None, stop_flag=None) -> dict:
+    """执行一次全库增量补采（与 update_panel._worker_run 完全同一路径）。"""
+    from crawler.api.client import ApiClient
+    from crawler.tasks.increment import incremental_update
+    from storage import dao
+
+    client = ApiClient()
+    try:
+        aids = dao.list_all_video_aids()
+        if not aids:
+            return {"ok": True, "skipped": True, "msg": "库中暂无已采集视频，跳过"}
+        incremental_update(client, aids, progress_cb=progress_cb,
+                           item_cb=item_cb, stop_flag=stop_flag)
+        return {"ok": True, "videos": len(aids),
+                "msg": f"增量补采完成：处理 {len(aids)} 个视频"}
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def run_ups_batch(max_pages: int = 100, progress_cb=None, item_cb=None,
+                  stop_flag=None) -> dict:
+    """批量增量更新历史博主（与 update_panel._worker_ups_batch 同一路径）。"""
+    from crawler.api.client import ApiClient
+    from crawler.tasks.increment import update_ups_batch
+    from storage import dao
+
+    rows = dao.query_up_stats()
+    uids = [r["mid"] for r in rows]
+    if not uids:
+        return {"ok": True, "skipped": True, "msg": "库中暂无已记录的博主，跳过"}
+
+    client = ApiClient()
+    try:
+        result = update_ups_batch(client, uids, max_pages=max(1, int(max_pages or 100)),
+                                  progress_cb=progress_cb, item_cb=item_cb,
+                                  stop_flag=stop_flag)
+        return {"ok": True, "result": result, "ups": len(uids)}
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def load_videos_for_update() -> dict:
+    """增量轮询页的已采集视频表（含完成状态标记）。"""
+    from gui.util import load_videos
+
+    try:
+        videos = load_videos()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "rows": []}
+
+    rows = []
+    for v in videos:
+        c = v.get("comment_count", 0)
+        d = v.get("danmaku_count", 0)
+        c_done = v.get("comment_done")
+        d_done = v.get("danmaku_done")
+        flag = ""
+        if c_done or d_done:
+            flag = "完成" if (c_done or not c) and (d_done or not d) else "未完"
+        rows.append({
+            "bvid": v.get("bvid", ""),
+            "title": str(v.get("title", ""))[:60],
+            "comment_count": c,
+            "danmaku_count": d,
+            "flag": flag,
+        })
+    return {"ok": True, "rows": rows, "total": len(rows)}

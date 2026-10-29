@@ -21,6 +21,8 @@ function showPage(name) {
   if (name === "stats") refreshStats();
   if (name === "search") setTimeout(() => $("#search-input").focus(), 50);
   if (name === "collect") { loadUpStats(); loadVideoOptions(); }
+  if (name === "update") loadUpdateVideos();
+  if (name === "user") setTimeout(() => $("#uq-uid").focus(), 50);
 }
 
 $("#nav").addEventListener("click", (e) => {
@@ -619,6 +621,219 @@ $("#cl-view-stored").addEventListener("click", async () => {
     appendStreamLine("err", "✗ " + err);
     $("#cl-stream-status").textContent = "读取失败: " + err;
   }
+});
+
+/* ═══════════ 增量轮询页 ═══════════ */
+let upRunning = false;
+let upTimer = null;
+
+function upBadge(text, cls) {
+  const b = $("#up-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function upLog(text, cls = "") {
+  const box = $("#up-log");
+  const empty = box.querySelector(".stream-empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "stream-line " + cls;
+  div.textContent = text;
+  box.appendChild(div);
+  while (box.children.length > 500) box.removeChild(box.firstElementChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+/* 后端增量任务推送入口 */
+window.onIncrementLog = function (ev) {
+  if (!ev) return;
+  if (ev.type === "log") {
+    upLog(ev.text || "");
+  } else if (ev.type === "error") {
+    upLog("✗ " + (ev.text || "失败"), "err");
+    upBadge("失败", "offline");
+    setUpRunning(false);
+  } else if (ev.type === "finished") {
+    const r = ev.result || {};
+    upLog("✓ " + (r.msg || "任务完成"), "ok");
+    upBadge("已完成", "online");
+    setUpRunning(false);
+    loadUpdateVideos();
+  } else if (ev.type === "runner_done") {
+    setUpRunning(false);
+  }
+};
+
+function setUpRunning(on) {
+  upRunning = on;
+  $("#up-stop").disabled = !on;
+  $("#up-progress-wrap").style.display = on ? "block" : "none";
+  $("#up-once").disabled = on;
+  $("#up-ups").disabled = on;
+}
+
+async function runIncrement(mode) {
+  const bridge = api();
+  if (!bridge || upRunning) return;
+  const pages = Number($("#up-maxpages").value) || 100;
+  upBadge("运行中", "checking");
+  $("#up-state").textContent = mode === "ups" ? "正在批量更新博主…" : "正在增量补采…";
+  setUpRunning(true);
+  try {
+    const res = await bridge.start_increment(mode, pages);
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "启动失败");
+  } catch (err) {
+    upBadge("失败", "offline");
+    $("#up-state").textContent = "启动失败: " + err;
+    upLog("✗ " + err, "err");
+    setUpRunning(false);
+  }
+}
+
+function togglePolling() {
+  if (upRunning) {
+    stopIncrement();
+    return;
+  }
+  const mins = Math.max(1, Number($("#up-interval").value) || 30);
+  upBadge("轮询中", "checking");
+  $("#up-toggle").textContent = "停止轮询";
+  $("#up-state").textContent = `每 ${mins} 分钟自动补采一次`;
+  $("#up-next").textContent = `下次: ${new Date(Date.now() + mins * 60000).toLocaleTimeString()}`;
+  runIncrement("all");
+  upTimer = setInterval(() => {
+    if (!upRunning) { runIncrement("all"); }
+    $("#up-next").textContent =
+      `下次: ${new Date(Date.now() + mins * 60000).toLocaleTimeString()}`;
+  }, mins * 60000);
+}
+
+function stopPolling() {
+  if (upTimer) { clearInterval(upTimer); upTimer = null; }
+  $("#up-toggle").textContent = "开始轮询";
+  $("#up-next").textContent = "";
+  stopIncrement();
+}
+
+async function stopIncrement() {
+  const bridge = api();
+  if (!bridge) return;
+  $("#up-state").textContent = "正在停止…";
+  try {
+    await bridge.stop_increment();
+    upLog("已请求停止（已采数据仍会落库）");
+  } catch (e) { /* 忽略 */ }
+}
+
+async function loadUpdateVideos() {
+  const bridge = api();
+  if (!bridge) return;
+  try {
+    const res = await bridge.get_update_videos();
+    const body = $("#up-videos");
+    body.innerHTML = "";
+    if (!res || !res.ok) return;
+    $("#up-total").textContent = `共 ${res.total || 0} 个已采集视频`;
+    const frag = document.createDocumentFragment();
+    for (const r of res.rows || []) {
+      const tr = document.createElement("tr");
+      [r.bvid, r.title, r.comment_count, r.danmaku_count, r.flag].forEach((v) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+  } catch (e) { /* 静默 */ }
+}
+
+$("#up-toggle").addEventListener("click", togglePolling);
+$("#up-once").addEventListener("click", () => runIncrement("all"));
+$("#up-ups").addEventListener("click", () => runIncrement("ups"));
+$("#up-stop").addEventListener("click", () => { stopPolling(); });
+$("#up-refresh").addEventListener("click", loadUpdateVideos);
+
+/* ═══════════ 用户查询页 ═══════════ */
+let uqBusy = false;
+
+function uqBadge(text, cls) {
+  const b = $("#uq-badge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+async function queryUser() {
+  const bridge = api();
+  if (!bridge || uqBusy) return;
+  const raw = $("#uq-uid").value.trim();
+  if (!/^\d+$/.test(raw)) {
+    uqBadge("UID 需为纯数字", "offline");
+    return;
+  }
+  uqBusy = true;
+  uqBadge("查询中", "checking");
+  $("#uq-empty").style.display = "none";
+  try {
+    const res = await bridge.query_user(Number(raw), Number($("#uq-limit").value) || 500);
+    if (!res || res.ok !== true) throw new Error((res && res.error) || "查询失败");
+
+    // 画像卡
+    const card = $("#uq-profile-card");
+    if (res.profile) {
+      card.style.display = "block";
+      $("#uq-title").textContent = `${res.profile.uname} (UID: ${res.profile.uid})`;
+      $("#uq-subtitle").textContent =
+        `Lv.${res.profile.level} · ${res.profile.vip} · 性别: ${res.profile.sex} · 签名: ${res.profile.signature || "-"}`;
+    } else {
+      card.style.display = "block";
+      $("#uq-title").textContent = `用户 UID: ${res.uid}`;
+      $("#uq-subtitle").textContent = "未入库该用户的维度信息（仅展示发言历史）";
+    }
+
+    // 发言表
+    const all = [...(res.comments || []), ...(res.danmaku || [])];
+    $("#uq-count").textContent =
+      `评论 ${(res.comments || []).length} 条，弹幕 ${(res.danmaku || []).length} 条`;
+    const body = $("#uq-rows");
+    body.innerHTML = "";
+    if (!all.length) {
+      $("#uq-empty").style.display = "block";
+      $("#uq-empty").textContent = "该用户暂无入库发言记录";
+      uqBadge("无记录", "muted");
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const r of all) {
+      const tr = document.createElement("tr");
+      const src = r.kind === "弹幕"
+        ? `${r.bvid} ${Number(r.progress || 0).toFixed(1)}s ${r.title}`
+        : `${r.bvid} 赞${r.like_num ?? 0} ${r.title}`;
+      [r.kind, r.ctime, r.content, r.ip_location, src].forEach((v, i) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        if (i === 2) td.className = "cell-content";
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+    uqBadge("查询完成", "online");
+  } catch (err) {
+    uqBadge("查询失败", "offline");
+    $("#uq-count").textContent = "查询失败: " + err;
+  } finally {
+    uqBusy = false;
+  }
+}
+
+$("#uq-search").addEventListener("click", queryUser);
+$("#uq-uid").addEventListener("keydown", (e) => { if (e.key === "Enter") queryUser(); });
+
+/* ═══════════ 广泛采集页 ═══════════ */
+$("#br-switch-tk")?.addEventListener("click", () => {
+  alert("请关闭当前窗口后运行：\n\npython main.py gui --engine tk\n\n或在命令行直接使用：python main.py up <UID>");
 });
 
 /* ── 启动 ── */

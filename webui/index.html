@@ -15,6 +15,9 @@
       <nav class="nav" id="nav">
         <button class="nav-item active" data-page="connection"><span class="nav-icon">⚡</span><span class="nav-label">连接</span></button>
         <button class="nav-item" data-page="collect"><span class="nav-icon">🎯</span><span class="nav-label">采集</span></button>
+        <button class="nav-item" data-page="update"><span class="nav-icon">🔄</span><span class="nav-label">增量</span></button>
+        <button class="nav-item" data-page="user"><span class="nav-icon">👤</span><span class="nav-label">用户</span></button>
+        <button class="nav-item" data-page="broad"><span class="nav-icon">🌐</span><span class="nav-label">广泛</span></button>
         <button class="nav-item" data-page="stats"><span class="nav-icon">📊</span><span class="nav-label">统计</span></button>
         <button class="nav-item" data-page="search"><span class="nav-icon">🔍</span><span class="nav-label">搜索</span></button>
         <button class="nav-item" data-page="report"><span class="nav-icon">📄</span><span class="nav-label">研报</span></button>
@@ -220,6 +223,109 @@
             <div class="progress-bar" id="rp-progress"></div>
           </div>
           <div class="status-line" id="rp-status">提示：输入 BV 号并选好板块后，点击「一键生成独立研报」即可开始装配。</div>
+        </div>
+      </section>
+
+      <section class="page" data-page="update">
+        <header class="page-head">
+          <h1>增量轮询</h1>
+          <p class="hint">对已采集视频定时补采新评论/弹幕 · 增量模式自动跳过已完成部分</p>
+        </header>
+
+        <div class="card">
+          <div class="form-row">
+            <label>轮询间隔(分钟)</label>
+            <input id="up-interval" class="form-input form-num" type="number" value="30" min="1" max="1440" />
+            <label>UP最大抓页数</label>
+            <input id="up-maxpages" class="form-input form-num" type="number" value="100" min="1" max="500" />
+            <button class="btn-accent" id="up-toggle">开始轮询</button>
+            <button class="btn-ghost" id="up-once">立即补采一次</button>
+            <button class="btn-ghost" id="up-ups">批量更新历史博主</button>
+            <button class="btn-ghost" id="up-stop" disabled>■ 停止任务</button>
+          </div>
+          <div class="form-row">
+            <span class="badge" id="up-badge">空闲</span>
+            <span class="status-line" id="up-state" style="margin-left:8px">空闲，等待开始</span>
+            <span class="spacer"></span>
+            <span class="status-line" id="up-next"></span>
+          </div>
+          <div class="progress-track" id="up-progress-wrap" style="display:none">
+            <div class="progress-bar indeterminate"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">更新日志</div>
+            <div class="card-sub">任务级提示与实时增量结果</div></div></div>
+          <div class="stream-box" id="up-log" style="height:200px">
+            <div class="stream-empty">等待开始…</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">已采集视频</div>
+            <div class="card-sub" id="up-total">加载中…</div></div>
+            <button class="btn-ghost" id="up-refresh">刷新列表</button></div>
+          <div class="result-table-wrap" style="max-height:340px">
+            <table class="result-table">
+              <thead><tr><th>BV</th><th>标题</th><th>评论数</th><th>弹幕数</th><th>状态</th></tr></thead>
+              <tbody id="up-videos"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="user">
+        <header class="page-head">
+          <h1>用户查询</h1>
+          <p class="hint">按 UID 检索该用户全部历史发言（评论 + 弹幕）与画像信息</p>
+        </header>
+
+        <div class="card">
+          <div class="form-row">
+            <label>用户 UID</label>
+            <input id="uq-uid" class="form-input form-num" type="text" placeholder="纯数字" />
+            <label>上限</label>
+            <input id="uq-limit" class="form-input form-num" type="number" value="500" min="1" />
+            <button class="btn-accent" id="uq-search">查询</button>
+            <span class="badge" id="uq-badge">待查询</span>
+          </div>
+        </div>
+
+        <div class="card" id="uq-profile-card" style="display:none">
+          <div class="card-head"><div><div class="card-title" id="uq-title">—</div>
+            <div class="card-sub" id="uq-subtitle">—</div></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">发言历史</div>
+            <div class="card-sub" id="uq-count">尚未查询</div></div></div>
+          <div class="result-table-wrap" style="max-height:calc(100vh - 420px)">
+            <table class="result-table">
+              <thead><tr><th>类型</th><th>时间</th><th>内容</th><th>属地</th><th>来源</th></tr></thead>
+              <tbody id="uq-rows"></tbody>
+            </table>
+            <div class="empty-hint" id="uq-empty">输入 UID 后点击查询</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page" data-page="broad">
+        <header class="page-head">
+          <h1>广泛采集</h1>
+          <p class="hint">BFS 自动扩展采集：从种子用户出发，按关系链层层扩散</p>
+        </header>
+        <div class="card">
+          <div class="card-head"><div><div class="card-title">扩散采集</div>
+            <div class="card-sub">该功能涉及复杂的 BFS 调度与多层去重，推荐使用经典 Tk 引擎</div></div></div>
+          <div class="form-row">
+            <button class="btn-accent" id="br-switch-tk">切换到经典 Tk 引擎</button>
+          </div>
+          <div class="status-line" style="margin-top:10px">
+            广泛采集包含关系图遍历、收藏夹递归、多层深度控制等复杂交互，
+            迁移收益低于风险。命令行等价能力：
+            <code style="background:var(--bg-muted);padding:2px 6px;border-radius:4px">python main.py up &lt;UID&gt;</code>
+          </div>
         </div>
       </section>
     </main>
