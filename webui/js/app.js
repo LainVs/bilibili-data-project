@@ -1313,6 +1313,26 @@ const STAT_LABELS_FULL = {
   comment_uids: ["评论独立UID", "个"], crc_total: ["反查总量", "条"],
 };
 
+/* 缓存过期阈值：超过这个天数就提醒用户刷新 */
+const STALE_DAYS = 3;
+
+function showStaleBanner(cacheTime, ageDays) {
+  const banner = $("#st-stale");
+  if (ageDays === null || ageDays === undefined) {
+    banner.style.display = "none";
+    return;
+  }
+  if (ageDays < STALE_DAYS) {
+    banner.style.display = "none";
+    return;
+  }
+  const ageText = ageDays === 0 ? "今天" : `${ageDays} 天前`;
+  $("#st-stale-text").textContent =
+    `数据更新于${ageText}${cacheTime ? `（${cacheTime}）` : ""}，` +
+    `归档新分仓后统计不会自动更新，看到的可能不是最新总量。`;
+  banner.style.display = "flex";
+}
+
 async function loadStatsOverview(refresh) {
   const bridge = api();
   if (!bridge) return;
@@ -1320,6 +1340,7 @@ async function loadStatsOverview(refresh) {
   if (refresh) {
     grid.innerHTML = '<div class="stat-card"><div class="stat-label">全表聚合中…</div></div>';
     $("#st-updated").textContent = "正在统计（大库可能较久）";
+    $("#st-stale").style.display = "none";
   }
   try {
     const res = await bridge.get_stats_overview(!!refresh);
@@ -1338,11 +1359,21 @@ async function loadStatsOverview(refresh) {
       frag.appendChild(card);
     }
     grid.appendChild(frag);
-    $("#st-updated").textContent = res.cached
-      ? "来自本地缓存（点刷新重新统计）" : "刚刚统计完成";
+
+    if (res.cached) {
+      const age = res.cache_age_days;
+      const ageText = age === null || age === undefined ? "未知时间"
+        : (age === 0 ? "今天" : `${age} 天前`);
+      $("#st-updated").textContent = `缓存数据 · 更新于${ageText}`;
+      showStaleBanner(res.cache_time, age);
+    } else {
+      $("#st-updated").textContent = "刚刚统计完成";
+      $("#st-stale").style.display = "none";
+    }
   } catch (err) {
     grid.innerHTML = `<div class="stat-card"><div class="stat-label">读取失败</div>` +
       `<div class="stat-sub">${escapeHtml(String(err))}</div></div>`;
+    $("#st-stale").style.display = "none";
   }
 }
 
@@ -1583,6 +1614,7 @@ async function runDetect() {
 }
 
 $("#st-refresh").addEventListener("click", () => loadStatsOverview(true));
+$("#st-stale-refresh").addEventListener("click", () => loadStatsOverview(true));
 $("#rk-refresh").addEventListener("click", loadRankings);
 $("#tr-refresh").addEventListener("click", loadTrends);
 $("#ins-refresh").addEventListener("click", loadInsights);

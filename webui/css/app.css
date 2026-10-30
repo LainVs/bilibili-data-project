@@ -326,6 +326,26 @@ html, body {
 .pager { display: flex; align-items: center; gap: 12px; justify-content: center; padding: 10px 0; }
 .search-text-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 8px; }
 
+/* ── 统计缓存过期提示 ── */
+.stale-banner {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 13px; margin-bottom: 12px;
+  background: var(--warning-bg, #fff8e6);
+  border: 1px solid #f0d9a8;
+  border-radius: 8px;
+  font-size: 12.5px; color: var(--warning-fg, #a36814);
+  animation: staleIn 0.25s ease-out;
+}
+@keyframes staleIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.stale-icon { font-size: 14px; flex-shrink: 0; }
+.stale-text { flex: 1; line-height: 1.5; }
+.stale-btn {
+  padding: 4px 12px; font-size: 12px; flex-shrink: 0;
+  border-color: #e8c98a; color: var(--warning-fg, #a36814);
+  background: transparent;
+}
+.stale-btn:hover { background: #fdf0d0; }
+
 /* ── 占位卡（迁移中的页面）── */
 .placeholder-card { text-align: center; padding: 48px 24px; }
 .placeholder-icon { font-size: 36px; }

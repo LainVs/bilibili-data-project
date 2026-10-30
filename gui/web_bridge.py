@@ -41,8 +41,25 @@ def read_overview() -> dict:
     if isinstance(cached, dict):
         inner = cached.get("stats")
         if isinstance(inner, dict) and inner:
-            return {"ok": True, "stats": inner, "cached": True}
+            return {"ok": True, "stats": inner, "cached": True,
+                    "cache_time": str(cached.get("time") or ""),
+                    "cache_age_days": _cache_age_days(cached.get("time"))}
     return {"ok": True, "stats": None, "cached": False}
+
+
+def _cache_age_days(ts) -> int | None:
+    """缓存时间戳 → 距今多少天（解析失败返回 None）。"""
+    if not ts:
+        return None
+    import datetime as _dt
+
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            dt = _dt.datetime.strptime(str(ts).strip(), fmt)
+            return max(0, (_dt.datetime.now() - dt).days)
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 def check_archive_resume() -> dict:
